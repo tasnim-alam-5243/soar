@@ -1,0 +1,17 @@
+# Retention is configuration, not code (spec section 5.2).
+# `soar migrate` turns this into OpenSearch ISM delete policies for time-series indices.
+# The scheduler (later step) uses the same file for cleanup jobs and MinIO lifecycle rules.
+# Allowed values: <N>d, <N>h, or "ttl" (cleaned by the document's own expires_at).
+default: 7d
+classes:
+  alerts: 7d          # time-series: ISM delete after rollover age
+  raw: 7d             # time-series
+  steprun: 7d         # time-series
+  timeline: 7d        # time-series
+  audit: 7d           # planned: 365d (audit logs normally need longer retention)
+  executions: 7d      # state: scheduler cleanup, from ended_at; running/waiting never deleted
+  cases: 3d           # state: scheduler cleanup, from closed_at; open cases never deleted
+  case_evidence: 3d   # state: follows its case (tasks, alert snapshots, evidence)
+  observables: 7d     # state: from last_seen; kept while linked to a live case
+  idempotency: ttl    # by expires_at
+  seen: ttl           # soar-seen, 24 h exact-duplicate guard

@@ -84,3 +84,36 @@ func TestSecretsNeverLogged(t *testing.T) {
 		}
 	}
 }
+
+func TestIndexSettingsDefaultsAndOverrides(t *testing.T) {
+	base := map[string]string{"SOAR_OS_URLS": "http://os:9200", "SOAR_NATS_URL": "nats://n:4222"}
+	c, err := Load(env(base))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.IndexPrefix != "soar" || c.StateReplicas != 0 || c.TSReplicas != 0 || c.RetentionFile != "/etc/soar/retention.yaml" {
+		t.Fatalf("unexpected defaults: %+v", c)
+	}
+	base["SOAR_INDEX_PREFIX"] = "soar-prod"
+	base["SOAR_OS_STATE_REPLICAS"] = "1"
+	base["SOAR_OS_TS_REPLICAS"] = "2"
+	base["SOAR_RETENTION_FILE"] = "/tmp/r.yaml"
+	c, err = Load(env(base))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.IndexPrefix != "soar-prod" || c.StateReplicas != 1 || c.TSReplicas != 2 || c.RetentionFile != "/tmp/r.yaml" {
+		t.Fatalf("overrides ignored: %+v", c)
+	}
+}
+
+func TestIndexSettingsValidation(t *testing.T) {
+	_, err := Load(env(map[string]string{
+		"SOAR_OS_URLS": "http://os:9200", "SOAR_NATS_URL": "nats://n:4222",
+		"SOAR_INDEX_PREFIX": "Bad Prefix", "SOAR_OS_STATE_REPLICAS": "-1", "SOAR_OS_TS_REPLICAS": "x",
+	}))
+	var ve *ValidationError
+	if !errors.As(err, &ve) || len(ve.Problems) != 3 {
+		t.Fatalf("want 3 problems, got %v", err)
+	}
+}

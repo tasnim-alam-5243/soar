@@ -1,4 +1,4 @@
-# Dev stack (Step 1). Keycloak, MinIO, runner and web are added by the steps that need them.
+# Dev stack (Steps 1-2). Keycloak, MinIO, runner and web are added by the steps that need them.
 # Security plugin is OFF for OpenSearch in dev. Production enables TLS + a least-privilege user (Step 9/15).
 name: soar
 
@@ -14,6 +14,9 @@ x-soar: &soar
     SOAR_NATS_URL: nats://nats:4222
     SOAR_PARTITIONS: "${SOAR_PARTITIONS:-8}"
     SOAR_LOG_LEVEL: "${SOAR_LOG_LEVEL:-info}"
+    # Step 2. One dev node cannot hold replicas (cluster would stay yellow); production sets both to 1.
+    SOAR_OS_STATE_REPLICAS: "${SOAR_OS_STATE_REPLICAS:-0}"
+    SOAR_OS_TS_REPLICAS: "${SOAR_OS_TS_REPLICAS:-0}"
   depends_on:
     opensearch: { condition: service_healthy }
     nats: { condition: service_healthy }
@@ -74,6 +77,10 @@ services:
     <<: *soar
     restart: "no"
     command: ["migrate"]
+    volumes:
+      # Edit config/retention.yaml, then `make migrate` applies it without rebuilding the image.
+      # (The same file is also baked into the image at /etc/soar/retention.yaml.)
+      - ../../config/retention.yaml:/etc/soar/retention.yaml:ro,z
     depends_on:
       opensearch: { condition: service_healthy }
       nats: { condition: service_healthy }

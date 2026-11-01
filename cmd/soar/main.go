@@ -32,14 +32,15 @@ var commands = map[string]struct {
 	run  runFunc
 	help string
 }{
-	"api":          {api.Run, "REST API, auth, CRUD, search"},
-	"ingest":       {ingest.Run, "HTTP push receiver (never waits on OpenSearch)"},
-	"collector":    {collector.Run, "pull and stream adapters; owns cursors"},
-	"processor":    {processor.Run, "consume EVENTS: dedup, bulk-write, match triggers"},
-	"orchestrator": {orchestrator.Run, "advance executions"},
-	"worker":       {worker.Run, "run actions, write step results"},
-	"scheduler":    {scheduler.Run, "cron, pollers, timers, recovery (leader-elected)"},
-	"migrate":      {service.Migrate, "index templates and migrations (run once, then exit)"},
+	"api":           {api.Run, "REST API, auth, CRUD, search"},
+	"ingest":        {ingest.Run, "HTTP push receiver (never waits on OpenSearch)"},
+	"collector":     {collector.Run, "pull and stream adapters; owns cursors"},
+	"processor":     {processor.Run, "consume EVENTS: dedup, bulk-write, match triggers"},
+	"orchestrator":  {orchestrator.Run, "advance executions"},
+	"worker":        {worker.Run, "run actions, write step results"},
+	"scheduler":     {scheduler.Run, "cron, pollers, timers, recovery (leader-elected)"},
+	"migrate":       {service.Migrate, "create/update index templates, indices and retention policies (run once, then exit)"},
+	"migrate-check": {service.MigrateCheck, "verify the live indices against the schema; changes nothing"},
 }
 
 func main() { os.Exit(run(os.Args[1:], os.Stdout, os.Stderr)) }
@@ -130,9 +131,9 @@ func usage(w io.Writer) {
 	}
 	sort.Strings(names)
 	for _, n := range names {
-		fmt.Fprintf(w, "  %-13s %s\n", n, commands[n].help)
+		fmt.Fprintf(w, "  %-14s %s\n", n, commands[n].help)
 	}
-	fmt.Fprintln(w, "  healthcheck   probe a URL and exit 0 if HTTP 200 (for container health checks)")
-	fmt.Fprintln(w, "  version       print version")
+	fmt.Fprintln(w, "  healthcheck    probe a URL and exit 0 if HTTP 200 (for container health checks)")
+	fmt.Fprintln(w, "  version        print version")
 	fmt.Fprintln(w, "\nconfiguration is read from SOAR_* environment variables (see .env.example)")
 }

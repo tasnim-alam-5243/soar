@@ -8,9 +8,12 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 )
+
+var prefixRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,30}$`)
 
 // Roles lists the subcommands that run a long-lived service.
 var Roles = []string{"api", "ingest", "collector", "processor", "orchestrator", "worker", "scheduler"}
@@ -35,6 +38,12 @@ type Config struct {
 	Partitions int
 	LogLevel   slog.Level
 	HTTPAddr   string // empty means the role default
+
+	// Step 2: index management (used by `soar migrate`; other roles only read IndexPrefix).
+	IndexPrefix   string // index and alias prefix, default "soar"
+	StateReplicas int    // replicas for state indices: 0 on one dev node, 1 in production
+	TSReplicas    int    // replicas for time-series indices
+	RetentionFile string // retention.yaml (spec section 5.2)
 }
 
 // ValidationError lists every invalid setting.
@@ -56,7 +65,7 @@ func Load(lookup func(string) (string, bool)) (Config, error) {
 		return strings.TrimSpace(v)
 	}
 
-	c := Config{Partitions: 8, LogLevel: slog.LevelInfo}
+	c := Config{Partitions: 8, LogLevel: slog.LevelInfo, IndexPrefix: "soar", RetentionFile: "/etc/soar/retention.yaml"}
 
 	c.OSURLs = splitList(get("SOAR_OS_URLS"))
 	if len(c.OSURLs) == 0 {
@@ -117,6 +126,30 @@ func Load(lookup func(string) (string, bool)) (Config, error) {
 		}
 	}
 
+	if v := get("SOAR_INDEX_PREFIX"); v != "" {
+		if !prefixRe.MatchString(v) {
+			bad("SOAR_INDEX_PREFIX must be lowercase letters, digits, - or _ (max 31 chars), got %q", v)
+		} else {
+			c.IndexPrefix = v
+		}
+	}
+	for _, r := range []struct {
+		key string
+		dst *int
+	}{{"SOAR_OS_STATE_REPLICAS", &c.StateReplicas}, {"SOAR_OS_TS_REPLICAS", &c.TSReplicas}} {
+		if v := get(r.key); v != "" {
+			n, err := strconv.Atoi(v)
+			if err != nil || n < 0 || n > 5 {
+				bad("%s must be an integer from 0 to 5, got %q", r.key, v)
+			} else {
+				*r.dst = n
+			}
+		}
+	}
+	if v := get("SOAR_RETENTION_FILE"); v != "" {
+		c.RetentionFile = v
+	}
+
 	if len(problems) > 0 {
 		return c, &ValidationError{Problems: problems}
 	}
@@ -143,6 +176,10 @@ func (c Config) LogValue() slog.Value {
 		slog.Int("partitions", c.Partitions),
 		slog.String("log_level", c.LogLevel.String()),
 		slog.String("http_addr", c.HTTPAddr),
+		slog.String("index_prefix", c.IndexPrefix),
+		slog.Int("state_replicas", c.StateReplicas),
+		slog.Int("ts_replicas", c.TSReplicas),
+		slog.String("retention_file", c.RetentionFile),
 	)
 }
 

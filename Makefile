@@ -45,8 +45,12 @@ logs: ## Follow logs (make logs S=api to pick a service)
 	$(COMPOSE) $(COMPOSE_F) logs -f --tail=100 $(S)
 
 .PHONY: migrate
-migrate: ## Run `soar migrate` once
+migrate: image ## Apply index templates, indices and retention policies (safe to repeat)
 	$(COMPOSE) $(COMPOSE_F) run --rm migrate
+
+.PHONY: migrate-check
+migrate-check: image ## Verify live indices match the schema (Step 2 exit gate); changes nothing
+	$(COMPOSE) $(COMPOSE_F) run --rm migrate migrate-check
 
 .PHONY: smoke
 smoke: ## curl /readyz on the api (Step 1 exit gate)

@@ -12,5 +12,6 @@ RUN CGO_ENABLED=0 go build -trimpath \
 
 FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=build /out/soar /soar
+COPY --from=build /src/config/retention.yaml /etc/soar/retention.yaml
 USER nonroot:nonroot
 ENTRYPOINT ["/soar"]

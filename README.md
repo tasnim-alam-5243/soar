@@ -1,6 +1,6 @@
 # SOAR platform
 
-Implementation of the SOAR technical spec v0.9. **Current state: Step 1 (Foundation).**
+Implementation of the SOAR technical spec v0.9. **Current state: Step 2 (domain types, index templates, migrations).**
 
 One Go binary (`soar`), one image, role chosen by subcommand. Step 1 delivers the repo layout, the dev stack,
 config validation, JSON logging, health endpoints and CI. No business logic yet.
@@ -42,6 +42,9 @@ make down                            # stop (keep data) | make clean (delete dat
 | `SOAR_PARTITIONS` | no | 8 (1-256) |
 | `SOAR_LOG_LEVEL` | no | info |
 | `SOAR_HTTP_ADDR` | no | role default (table above) |
+| `SOAR_INDEX_PREFIX` | no | `soar` (lowercase letters, digits, `-`, `_`) |
+| `SOAR_OS_STATE_REPLICAS` / `SOAR_OS_TS_REPLICAS` | no | 0 (0-5); set 1 in production |
+| `SOAR_RETENTION_FILE` | no | `/etc/soar/retention.yaml` (baked into the image from `config/retention.yaml`) |
 
 Master key, OIDC and blob-store variables from spec §16 are added by the steps that use them (9 and 5).
 
@@ -57,3 +60,27 @@ Import rule: `domain` imports nothing internal; nothing imports `cmd`.
 - [ ] `make test` and `make vet` pass; CI green on GitHub
 - [ ] `docker stop soar-nats-1` makes `/readyz` return 503 within seconds; starting it restores 200
 - [ ] `docker compose -f deploy/compose/docker-compose.yml run --rm -e SOAR_PARTITIONS=0 api` exits 2 and logs every problem
+
+## Step 2: indices, retention and migrations
+
+`soar migrate` creates, for each of the 22 indices in spec section 5, an index template with `dynamic: strict`
+mappings, the first index and its alias (`soar-alerts`, `soar-cases`, ...). Five time-series indices (`alerts`, `raw`,
+`steprun`, `timeline`, `audit`) use rollover (30 GB or 1 day) plus an ISM delete policy generated from
+`config/retention.yaml`. A ledger index (`soar-migrations`) stores a checksum per index, so repeating the command
+changes nothing.
+
+```bash
+make migrate         # apply (the stack also runs this automatically before every service starts)
+make migrate-check   # verify only; exit 1 on drift
+```
+
+Changing retention: edit `config/retention.yaml`, run `make migrate`, check with `make migrate-check`.
+Changing a mapping: edit `internal/store/opensearch/schema/entities.go`; additive changes apply in place.
+An incompatible change needs a `v2` index and `_reindex`.
+
+### Step 2 exit gate
+
+- [ ] `make migrate` twice: second run reports every index `unchanged`
+- [ ] `make migrate-check` exits 0
+- [ ] unknown field is rejected: `curl -s -XPUT localhost:9200/soar-workflows/_doc/t -H 'Content-Type: application/json' -d '{"x":1}'` returns `strict_dynamic_mapping_exception`
+- [ ] `make test` and `make test-integration` pass

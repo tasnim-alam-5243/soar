@@ -1,8 +1,10 @@
 // Package opensearch is the only place that talks to OpenSearch (spec section 3.1).
-// Step 1 only needs a reachability check; the real client arrives in Step 3.
+// Step 1 added a reachability check, Step 2 adds Do for index management; the
+// optimistic-concurrency document layer arrives in Step 3.
 package opensearch
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -19,12 +21,100 @@ type Client struct {
 	urls []string
 	user string
 	pass string
-	http *http.Client
+	http *http.Client // short timeout, health checks
+	slow *http.Client // index management can wait for shard allocation
 }
 
 // New builds a client for one or more node URLs. TLS options are added in Step 3.
 func New(urls []string, user, pass string) *Client {
-	return &Client{urls: urls, user: user, pass: pass, http: &http.Client{Timeout: 5 * time.Second}}
+	return &Client{
+		urls: urls, user: user, pass: pass,
+		http: &http.Client{Timeout: 5 * time.Second},
+		slow: &http.Client{Timeout: 60 * time.Second},
+	}
+}
+
+// APIError is a non-2xx answer from OpenSearch.
+type APIError struct {
+	Status int
+	Method string
+	Path   string
+	Body   string
+}
+
+func (e *APIError) Error() string {
+	b := e.Body
+	if len(b) > 600 {
+		b = b[:600] + "..."
+	}
+	return fmt.Sprintf("opensearch %s %s: HTTP %d: %s", e.Method, e.Path, e.Status, b)
+}
+
+// Do sends one JSON request (body may be nil) and returns the status and raw
+// response. A status of 400 or above is returned as *APIError unless it is
+// listed in allow. If a node cannot be reached the next URL is tried; an HTTP
+// answer, even an error one, is final.
+func (c *Client) Do(ctx context.Context, method, path string, body any, allow ...int) (int, []byte, error) {
+	var payload []byte
+	if body != nil {
+		var err error
+		if payload, err = json.Marshal(body); err != nil {
+			return 0, nil, fmt.Errorf("opensearch %s %s: encode body: %w", method, path, err)
+		}
+	}
+	var errs []error
+	for _, base := range c.urls {
+		status, out, err := c.doOne(ctx, base, method, path, payload)
+		if err != nil {
+			errs = append(errs, err) // connection-level problem: try the next node
+			continue
+		}
+		if status >= 400 && !containsInt(allow, status) {
+			return status, out, &APIError{Status: status, Method: method, Path: path, Body: string(out)}
+		}
+		return status, out, nil
+	}
+	return 0, nil, errors.Join(errs...)
+}
+
+func (c *Client) doOne(ctx context.Context, base, method, path string, payload []byte) (int, []byte, error) {
+	label := base
+	if u, err := url.Parse(base); err == nil {
+		label = u.Redacted()
+	}
+	var rd io.Reader
+	if payload != nil {
+		rd = bytes.NewReader(payload)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, strings.TrimRight(base, "/")+path, rd)
+	if err != nil {
+		return 0, nil, fmt.Errorf("opensearch %s: %w", label, err)
+	}
+	if payload != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	if c.user != "" {
+		req.SetBasicAuth(c.user, c.pass)
+	}
+	resp, err := c.slow.Do(req)
+	if err != nil {
+		return 0, nil, fmt.Errorf("opensearch %s: %w", label, err)
+	}
+	defer resp.Body.Close()
+	out, err := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
+	if err != nil {
+		return 0, nil, fmt.Errorf("opensearch %s: read response: %w", label, err)
+	}
+	return resp.StatusCode, out, nil
+}
+
+func containsInt(list []int, v int) bool {
+	for _, x := range list {
+		if x == v {
+			return true
+		}
+	}
+	return false
 }
 
 // Ping succeeds if any node answers and the cluster is not red.

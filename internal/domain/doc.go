@@ -1,2 +1,3 @@
-// Package domain holds core domain types (alerts, cases, executions). It imports nothing internal. Filled in Step 2.
+// Package domain holds the platform's core types (alerts, cases, executions, ...).
+// It imports nothing internal. Step 2 defines the stored document types and IDs.
 package domain
