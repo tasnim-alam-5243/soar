@@ -62,9 +62,14 @@ func (c *Client) Do(ctx context.Context, method, path string, body any, allow ..
 			return 0, nil, fmt.Errorf("opensearch %s %s: encode body: %w", method, path, err)
 		}
 	}
+	return c.DoRaw(ctx, method, path, "application/json", payload, allow...)
+}
+
+// DoRaw is Do with a ready-made body and content type (used for NDJSON bulk requests).
+func (c *Client) DoRaw(ctx context.Context, method, path, contentType string, payload []byte, allow ...int) (int, []byte, error) {
 	var errs []error
 	for _, base := range c.urls {
-		status, out, err := c.doOne(ctx, base, method, path, payload)
+		status, out, err := c.doOne(ctx, base, method, path, contentType, payload)
 		if err != nil {
 			errs = append(errs, err) // connection-level problem: try the next node
 			continue
@@ -77,7 +82,7 @@ func (c *Client) Do(ctx context.Context, method, path string, body any, allow ..
 	return 0, nil, errors.Join(errs...)
 }
 
-func (c *Client) doOne(ctx context.Context, base, method, path string, payload []byte) (int, []byte, error) {
+func (c *Client) doOne(ctx context.Context, base, method, path, contentType string, payload []byte) (int, []byte, error) {
 	label := base
 	if u, err := url.Parse(base); err == nil {
 		label = u.Redacted()
@@ -91,7 +96,7 @@ func (c *Client) doOne(ctx context.Context, base, method, path string, payload [
 		return 0, nil, fmt.Errorf("opensearch %s: %w", label, err)
 	}
 	if payload != nil {
-		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Content-Type", contentType)
 	}
 	if c.user != "" {
 		req.SetBasicAuth(c.user, c.pass)

@@ -358,3 +358,7 @@ type Connection struct {
 	SecretRefs  JSON   `json:"secret_refs,omitempty"`
 	Config      JSON   `json:"config,omitempty"`
 }
+
+// MetaPtr lets generic code reach the common fields of any stored document type
+// (every document type embeds Meta, so the method is promoted to all of them).
+func (m *Meta) MetaPtr() *Meta { return m }

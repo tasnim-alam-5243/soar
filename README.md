@@ -1,6 +1,6 @@
 # SOAR platform
 
-Implementation of the SOAR technical spec v0.9. **Current state: Step 2 (domain types, index templates, migrations).**
+Implementation of the SOAR technical spec v0.9. **Current state: Step 4 (storage layer and REST API).**
 
 One Go binary (`soar`), one image, role chosen by subcommand. Step 1 delivers the repo layout, the dev stack,
 config validation, JSON logging, health endpoints and CI. No business logic yet.
@@ -84,3 +84,57 @@ An incompatible change needs a `v2` index and `_reindex`.
 - [ ] `make migrate-check` exits 0
 - [ ] unknown field is rejected: `curl -s -XPUT localhost:9200/soar-workflows/_doc/t -H 'Content-Type: application/json' -d '{"x":1}'` returns `strict_dynamic_mapping_exception`
 - [ ] `make test` and `make test-integration` pass
+
+## Step 3: storage layer
+
+All reads and writes of documents go through `internal/store` (interfaces) and
+`internal/store/opensearch` (the only OpenSearch code). Services never build OpenSearch requests.
+
+- `store.Repo[T]`: `Get`, `Create`, `Put`, `Save` (optimistic: fails with `ErrVersionConflict` if the
+  document changed since it was read), `Update` (read-modify-write, bounded retries, then `ErrConflictExhausted`),
+  `Delete`, `List` (filters, ranges, one sort key, cursor pagination).
+- `store.BulkWriter`: many writes per request with a result per item (`OK`, `Conflict`, `Retryable`, `Permanent`),
+  optional per-item version checks, scripted upserts. `opensearch.GroupWriter` merges concurrent callers into
+  shared bulk requests (flush at 1,000 ops or 250 ms) and returns only after OpenSearch acknowledged.
+- `internal/store/memory` is an in-process implementation for unit tests. `internal/store/storetest` is the
+  behaviour contract; memory and OpenSearch must both pass it.
+- Time-series indices (`alerts`, `steprun`, ...) are read through a search and cannot be deleted by ID:
+  retention removes them. A just-written time-series document is searchable after the next refresh (up to 5 s).
+
+## Step 4: REST API
+
+`api/openapi.yaml` is the contract (served at `/api/v1/openapi.yaml`). Change it first, then the code.
+`go test ./internal/api` fails when a route and the document disagree, when a response breaks its schema, or when
+an operation is never exercised.
+
+**No authentication until Step 9.** The API is open; Compose publishes it on 127.0.0.1 only. Do not expose it.
+
+| Area | Endpoints (all under `/api/v1`) | Status |
+|---|---|---|
+| Workflows | `POST/GET /workflows`, `GET/PUT /workflows/{id}`, `POST /workflows/{id}/versions`, `/publish`, `POST /workflows/validate` | done (structural validation; CEL checks in Step 6) |
+| Run / cancel | `POST /workflows/{id}/run`, `POST /executions/{id}/cancel` | 501 until Steps 6-8 |
+| Executions | `GET /executions`, `GET /executions/{id}`, `GET /executions/{id}/steps` | done (read side) |
+| Alerts | `GET/POST /alerts`, `GET /alerts/{id}` | done (POST is manual entry; ingestion is Step 5) |
+| Cases | `POST/GET /cases`, `GET/PATCH /cases/{id}`, tasks, observables, timeline | done (alert linking in Step 11) |
+| Observables | `GET /observables`, `GET /observables/{id}` | done |
+| Connections | `POST/GET /connections`, `GET/DELETE /connections/{id}` | done (`/test` in Step 13) |
+| Sources, filters, mappings, queue, approvals, secrets, admin, connectors, `/stream` | | later steps |
+
+Conventions: errors are `application/problem+json` with `request_id`; lists return `{"items": [...], "next_cursor": "..."}`
+(`limit` 1-200); creates accept `Idempotency-Key`; single resources carry an `ETag`, and `If-Match` on `PUT`/`PATCH`/publish
+turns the update into a compare-and-set (409 on mismatch).
+
+Try it:
+
+```bash
+curl -s -XPOST localhost:8080/api/v1/cases -H 'Content-Type: application/json' \
+  -d '{"title":"Phishing campaign","severity":4}' | jq .
+curl -s 'localhost:8080/api/v1/cases?status=open' | jq .
+curl -s localhost:8080/api/v1/openapi.yaml | head
+```
+
+### Steps 3-4 exit gates
+
+- [ ] `make test` passes (includes the contract tests and the shared store suite on the in-memory store)
+- [ ] `make test-integration` passes (same store suite on real OpenSearch, bulk, group writer, API on the real stack)
+- [ ] the curl commands above work against `make up`

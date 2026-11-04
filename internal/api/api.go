@@ -1,16 +1,19 @@
-// Package api serves the REST API, auth, CRUD and search.
-// In Step 1 it only starts the shared health server; real behaviour arrives in later steps.
 package api
 
 import (
 	"context"
 	"log/slog"
+	"net/http"
 
 	"github.com/yourorg/soar/internal/config"
 	"github.com/yourorg/soar/internal/service"
+	"github.com/yourorg/soar/internal/store/opensearch"
 )
 
-// Run blocks until ctx is cancelled or a fatal error occurs.
+// Run serves the REST API and the health endpoints until ctx is cancelled.
 func Run(ctx context.Context, cfg config.Config, log *slog.Logger) error {
-	return service.Run(ctx, "api", cfg, log)
+	return service.RunWith(ctx, "api", cfg, log, func(mux *http.ServeMux, osc *opensearch.Client) {
+		st := opensearch.NewStore(osc, cfg.IndexPrefix, opensearch.Options{})
+		New(st, log).Mount(mux)
+	})
 }

@@ -63,7 +63,7 @@ func (r *Runner) Apply(ctx context.Context) ([]Result, error) {
 		} else {
 			res.Action = action
 		}
-		r.Log.Info("migrate", "entity", res.Entity, "action", res.Action, "detail", res.Detail)
+		r.Log.Debug("migrate", "entity", res.Entity, "action", res.Action, "detail", res.Detail)
 		results = append(results, res)
 	}
 	return results, nil

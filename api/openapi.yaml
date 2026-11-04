@@ -1,0 +1,757 @@
+openapi: 3.0.3
+info:
+  title: SOAR Platform API
+  version: 0.1.0
+  description: |
+    REST API of the SOAR platform (spec section 11). This file is the source of truth:
+    change it first, then the code. Contract tests fail when a route and this document disagree.
+
+    **No authentication yet.** Authentication and roles arrive in Step 9; until then bind the
+    API to localhost only.
+
+    Conventions: JSON bodies; timestamps are RFC 3339 UTC; cursor pagination (`limit` 1-200,
+    `cursor` from the previous page's `next_cursor`); errors are RFC 9457 `application/problem+json`;
+    `Idempotency-Key` on creates; `ETag` on single resources and optional `If-Match` on updates
+    (409 on mismatch); `X-Request-ID` on every response.
+servers:
+  - url: /api/v1
+paths:
+  /openapi.yaml:
+    get:
+      operationId: getOpenAPI
+      summary: This document
+      responses:
+        '200': { description: OpenAPI document, content: { application/yaml: { schema: { type: string } } } }
+        default: { $ref: '#/components/responses/Problem' }
+
+  /workflows:
+    post:
+      operationId: createWorkflow
+      summary: Create a workflow (version 1, draft)
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/WorkflowCreate' } } } }
+      responses:
+        '201': { $ref: '#/components/responses/WorkflowCreated' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        default: { $ref: '#/components/responses/Problem' }
+    get:
+      operationId: listWorkflows
+      summary: List workflow versions
+      parameters:
+        - { $ref: '#/components/parameters/Limit' }
+        - { $ref: '#/components/parameters/Cursor' }
+        - { name: sort, in: query, schema: { type: string, enum: [created_at, -created_at, name, -name, version, -version] } }
+        - { name: name, in: query, schema: { type: string } }
+        - { name: status, in: query, schema: { type: string } }
+      responses:
+        '200': { description: A page of workflows, content: { application/json: { schema: { $ref: '#/components/schemas/WorkflowPage' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        default: { $ref: '#/components/responses/Problem' }
+
+  /workflows/validate:
+    post:
+      operationId: validateWorkflow
+      summary: Check a workflow definition without saving it
+      description: Structural checks now; CEL and parameter checks arrive with the engine (Step 6).
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ValidateRequest' } } } }
+      responses:
+        '200': { description: Validation result, content: { application/json: { schema: { $ref: '#/components/schemas/ValidateResult' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        default: { $ref: '#/components/responses/Problem' }
+
+  /workflows/{id}:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    get:
+      operationId: getWorkflow
+      summary: Get one workflow version
+      responses:
+        '200': { $ref: '#/components/responses/WorkflowOK' }
+        '404': { $ref: '#/components/responses/Problem' }
+        default: { $ref: '#/components/responses/Problem' }
+    put:
+      operationId: updateWorkflow
+      summary: Replace a draft version (published versions are immutable)
+      parameters: [{ $ref: '#/components/parameters/IfMatch' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/WorkflowCreate' } } } }
+      responses:
+        '200': { $ref: '#/components/responses/WorkflowOK' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        default: { $ref: '#/components/responses/Problem' }
+
+  /workflows/{id}/versions:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    post:
+      operationId: createWorkflowVersion
+      summary: Create the next draft version (copies this one; send {} to copy unchanged)
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/WorkflowVersionCreate' } } } }
+      responses:
+        '201': { $ref: '#/components/responses/WorkflowCreated' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        default: { $ref: '#/components/responses/Problem' }
+
+  /workflows/{id}/publish:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    post:
+      operationId: publishWorkflow
+      summary: Validate and publish a draft; it becomes immutable
+      parameters: [{ $ref: '#/components/parameters/IfMatch' }]
+      responses:
+        '200': { $ref: '#/components/responses/WorkflowOK' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        default: { $ref: '#/components/responses/Problem' }
+
+  /workflows/{id}/run:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    post:
+      operationId: runWorkflow
+      summary: Start an execution (needs the engine; returns 501 until Steps 6-7)
+      responses:
+        '501': { $ref: '#/components/responses/Problem' }
+        default: { $ref: '#/components/responses/Problem' }
+
+  /executions:
+    get:
+      operationId: listExecutions
+      summary: List executions
+      parameters:
+        - { $ref: '#/components/parameters/Limit' }
+        - { $ref: '#/components/parameters/Cursor' }
+        - { name: sort, in: query, schema: { type: string, enum: [created_at, -created_at, started_at, -started_at, ended_at, -ended_at] } }
+        - { name: workflow_id, in: query, schema: { type: string } }
+        - { name: status, in: query, schema: { type: string } }
+        - { name: alert_id, in: query, schema: { type: string } }
+      responses:
+        '200': { description: A page of executions, content: { application/json: { schema: { $ref: '#/components/schemas/ExecutionPage' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        default: { $ref: '#/components/responses/Problem' }
+
+  /executions/{id}:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    get:
+      operationId: getExecution
+      summary: Get one execution
+      responses:
+        '200': { description: The execution, headers: { ETag: { schema: { type: string } } }, content: { application/json: { schema: { $ref: '#/components/schemas/Execution' } } } }
+        '404': { $ref: '#/components/responses/Problem' }
+        default: { $ref: '#/components/responses/Problem' }
+
+  /executions/{id}/steps:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    get:
+      operationId: listExecutionSteps
+      summary: Step runs of an execution, oldest first
+      parameters:
+        - { $ref: '#/components/parameters/Limit' }
+        - { $ref: '#/components/parameters/Cursor' }
+        - { name: sort, in: query, schema: { type: string, enum: [created_at, -created_at] } }
+      responses:
+        '200': { description: A page of step runs, content: { application/json: { schema: { $ref: '#/components/schemas/StepRunPage' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        default: { $ref: '#/components/responses/Problem' }
+
+  /executions/{id}/cancel:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    post:
+      operationId: cancelExecution
+      summary: Cancel an execution (needs the engine; returns 501 until Steps 6-8)
+      responses:
+        '501': { $ref: '#/components/responses/Problem' }
+        default: { $ref: '#/components/responses/Problem' }
+
+  /alerts:
+    get:
+      operationId: listAlerts
+      summary: Search alerts, newest first
+      parameters:
+        - { $ref: '#/components/parameters/Limit' }
+        - { $ref: '#/components/parameters/Cursor' }
+        - { name: sort, in: query, schema: { type: string, enum: [received_at, -received_at, severity, -severity, occurrence_count, -occurrence_count, last_seen, -last_seen] } }
+        - { name: source_id, in: query, schema: { type: string } }
+        - { name: system, in: query, schema: { type: string } }
+        - { name: kind, in: query, schema: { type: string } }
+        - { name: status, in: query, schema: { type: string } }
+        - { name: verdict, in: query, schema: { type: string } }
+        - { name: severity, in: query, schema: { type: string }, description: Exact severity, comma-separated for several }
+        - { name: min_severity, in: query, schema: { type: integer, minimum: 1, maximum: 5 } }
+        - { name: case_id, in: query, schema: { type: string } }
+        - { name: from, in: query, schema: { type: string, format: date-time } }
+        - { name: to, in: query, schema: { type: string, format: date-time } }
+      responses:
+        '200': { description: A page of alerts, content: { application/json: { schema: { $ref: '#/components/schemas/AlertPage' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        default: { $ref: '#/components/responses/Problem' }
+    post:
+      operationId: createAlert
+      summary: Record an alert by hand (monitored systems use the ingestion pipeline)
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/AlertCreate' } } } }
+      responses:
+        '201': { description: Created, headers: { Location: { schema: { type: string } }, ETag: { schema: { type: string } } }, content: { application/json: { schema: { $ref: '#/components/schemas/Alert' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        default: { $ref: '#/components/responses/Problem' }
+
+  /alerts/{id}:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    get:
+      operationId: getAlert
+      summary: Get one alert
+      responses:
+        '200': { description: The alert, headers: { ETag: { schema: { type: string } } }, content: { application/json: { schema: { $ref: '#/components/schemas/Alert' } } } }
+        '404': { $ref: '#/components/responses/Problem' }
+        default: { $ref: '#/components/responses/Problem' }
+
+  /cases:
+    post:
+      operationId: createCase
+      summary: Open a case
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/CaseCreate' } } } }
+      responses:
+        '201': { description: Created, headers: { Location: { schema: { type: string } }, ETag: { schema: { type: string } } }, content: { application/json: { schema: { $ref: '#/components/schemas/Case' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        default: { $ref: '#/components/responses/Problem' }
+    get:
+      operationId: listCases
+      summary: List cases, newest first
+      parameters:
+        - { $ref: '#/components/parameters/Limit' }
+        - { $ref: '#/components/parameters/Cursor' }
+        - { name: sort, in: query, schema: { type: string, enum: [created_at, -created_at, updated_at, -updated_at, severity, -severity, title, -title] } }
+        - { name: status, in: query, schema: { type: string } }
+        - { name: severity, in: query, schema: { type: string } }
+        - { name: assignee, in: query, schema: { type: string } }
+        - { name: tag, in: query, schema: { type: string } }
+        - { name: verdict, in: query, schema: { type: string } }
+      responses:
+        '200': { description: A page of cases, content: { application/json: { schema: { $ref: '#/components/schemas/CasePage' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        default: { $ref: '#/components/responses/Problem' }
+
+  /cases/{id}:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    get:
+      operationId: getCase
+      summary: Get one case
+      responses:
+        '200': { description: The case, headers: { ETag: { schema: { type: string } } }, content: { application/json: { schema: { $ref: '#/components/schemas/Case' } } } }
+        '404': { $ref: '#/components/responses/Problem' }
+        default: { $ref: '#/components/responses/Problem' }
+    patch:
+      operationId: patchCase
+      summary: Change some fields of a case (absent fields stay as they are)
+      parameters: [{ $ref: '#/components/parameters/IfMatch' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/CasePatch' } } } }
+      responses:
+        '200': { description: The updated case, headers: { ETag: { schema: { type: string } } }, content: { application/json: { schema: { $ref: '#/components/schemas/Case' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        default: { $ref: '#/components/responses/Problem' }
+
+  /cases/{id}/tasks:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    post:
+      operationId: createCaseTask
+      summary: Add a task to a case
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/CaseTaskCreate' } } } }
+      responses:
+        '201': { description: Created, headers: { ETag: { schema: { type: string } } }, content: { application/json: { schema: { $ref: '#/components/schemas/CaseTask' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        default: { $ref: '#/components/responses/Problem' }
+    get:
+      operationId: listCaseTasks
+      summary: Tasks of a case, oldest first
+      parameters:
+        - { $ref: '#/components/parameters/Limit' }
+        - { $ref: '#/components/parameters/Cursor' }
+        - { name: sort, in: query, schema: { type: string, enum: [created_at, -created_at] } }
+      responses:
+        '200': { description: A page of tasks, content: { application/json: { schema: { $ref: '#/components/schemas/CaseTaskPage' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        default: { $ref: '#/components/responses/Problem' }
+
+  /cases/{id}/observables:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    post:
+      operationId: addCaseObservable
+      summary: Link an indicator to a case (creates the observable on first sight)
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/CaseObservableCreate' } } } }
+      responses:
+        '200': { description: The observable already existed and is now linked, content: { application/json: { schema: { $ref: '#/components/schemas/Observable' } } } }
+        '201': { description: The observable was created, content: { application/json: { schema: { $ref: '#/components/schemas/Observable' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        default: { $ref: '#/components/responses/Problem' }
+
+  /cases/{id}/timeline:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    get:
+      operationId: getCaseTimeline
+      summary: Events of a case, oldest first
+      parameters:
+        - { $ref: '#/components/parameters/Limit' }
+        - { $ref: '#/components/parameters/Cursor' }
+        - { name: sort, in: query, schema: { type: string, enum: [created_at, -created_at] } }
+      responses:
+        '200': { description: A page of timeline events, content: { application/json: { schema: { $ref: '#/components/schemas/TimelinePage' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        default: { $ref: '#/components/responses/Problem' }
+
+  /observables:
+    get:
+      operationId: listObservables
+      summary: List observables, most recently seen first
+      parameters:
+        - { $ref: '#/components/parameters/Limit' }
+        - { $ref: '#/components/parameters/Cursor' }
+        - { name: sort, in: query, schema: { type: string, enum: [last_seen, -last_seen, first_seen, -first_seen] } }
+        - { name: type, in: query, schema: { type: string } }
+        - { name: value, in: query, schema: { type: string } }
+        - { name: case_id, in: query, schema: { type: string } }
+      responses:
+        '200': { description: A page of observables, content: { application/json: { schema: { $ref: '#/components/schemas/ObservablePage' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        default: { $ref: '#/components/responses/Problem' }
+
+  /observables/{id}:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    get:
+      operationId: getObservable
+      summary: Get one observable
+      responses:
+        '200': { description: The observable, headers: { ETag: { schema: { type: string } } }, content: { application/json: { schema: { $ref: '#/components/schemas/Observable' } } } }
+        '404': { $ref: '#/components/responses/Problem' }
+        default: { $ref: '#/components/responses/Problem' }
+
+  /connections:
+    post:
+      operationId: createConnection
+      summary: Store how to reach an external system (secrets are referenced by name only)
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ConnectionCreate' } } } }
+      responses:
+        '201': { description: Created, headers: { Location: { schema: { type: string } }, ETag: { schema: { type: string } } }, content: { application/json: { schema: { $ref: '#/components/schemas/Connection' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        default: { $ref: '#/components/responses/Problem' }
+    get:
+      operationId: listConnections
+      summary: List connections
+      parameters:
+        - { $ref: '#/components/parameters/Limit' }
+        - { $ref: '#/components/parameters/Cursor' }
+        - { name: sort, in: query, schema: { type: string, enum: [created_at, -created_at, name, -name] } }
+        - { name: connector_id, in: query, schema: { type: string } }
+      responses:
+        '200': { description: A page of connections, content: { application/json: { schema: { $ref: '#/components/schemas/ConnectionPage' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        default: { $ref: '#/components/responses/Problem' }
+
+  /connections/{id}:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    get:
+      operationId: getConnection
+      summary: Get one connection
+      responses:
+        '200': { description: The connection, headers: { ETag: { schema: { type: string } } }, content: { application/json: { schema: { $ref: '#/components/schemas/Connection' } } } }
+        '404': { $ref: '#/components/responses/Problem' }
+        default: { $ref: '#/components/responses/Problem' }
+    delete:
+      operationId: deleteConnection
+      summary: Delete a connection
+      responses:
+        '204': { description: Deleted }
+        '404': { $ref: '#/components/responses/Problem' }
+        default: { $ref: '#/components/responses/Problem' }
+
+components:
+  parameters:
+    Id: { name: id, in: path, required: true, schema: { type: string, minLength: 1 } }
+    Limit: { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 200, default: 50 } }
+    Cursor: { name: cursor, in: query, description: next_cursor of the previous page, schema: { type: string } }
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      description: Repeats of a create with the same key return the original resource instead of creating another.
+      schema: { type: string, pattern: '^[A-Za-z0-9._:-]{1,128}$' }
+    IfMatch:
+      name: If-Match
+      in: header
+      description: ETag from a previous response. If the resource changed since, the update fails with 409.
+      schema: { type: string }
+
+  responses:
+    Problem:
+      description: Error (RFC 9457 problem details)
+      content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
+    WorkflowOK:
+      description: The workflow version
+      headers: { ETag: { schema: { type: string } } }
+      content: { application/json: { schema: { $ref: '#/components/schemas/Workflow' } } }
+    WorkflowCreated:
+      description: Created
+      headers: { Location: { schema: { type: string } }, ETag: { schema: { type: string } } }
+      content: { application/json: { schema: { $ref: '#/components/schemas/Workflow' } } }
+
+  schemas:
+    Problem:
+      type: object
+      required: [type, title, status]
+      properties:
+        type: { type: string }
+        title: { type: string }
+        status: { type: integer }
+        detail: { type: string }
+        request_id: { type: string }
+        errors: { type: array, items: { $ref: '#/components/schemas/FieldError' } }
+    FieldError:
+      type: object
+      required: [path, message]
+      properties: { path: { type: string }, message: { type: string } }
+
+    Meta:
+      type: object
+      required: [id, created_at, updated_at, schema_version]
+      properties:
+        id: { type: string }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        schema_version: { type: integer }
+
+    Trigger:
+      type: object
+      required: [type]
+      properties:
+        type: { type: string, enum: [alert, schedule, manual, event] }
+        kind: { type: string }
+        match: { type: string, description: CEL condition }
+    Workflow:
+      allOf:
+        - { $ref: '#/components/schemas/Meta' }
+        - type: object
+          required: [name, version, status, definition]
+          properties:
+            name: { type: string }
+            description: { type: string }
+            version: { type: integer, minimum: 1 }
+            status: { type: string, enum: [draft, published, archived] }
+            definition: { type: object }
+            triggers: { type: array, items: { $ref: '#/components/schemas/Trigger' } }
+            checksum: { type: string }
+            created_by: { type: string }
+    WorkflowCreate:
+      type: object
+      required: [name, definition]
+      additionalProperties: false
+      properties:
+        name: { type: string, minLength: 1, maxLength: 200 }
+        description: { type: string, maxLength: 2000 }
+        definition: { type: object }
+        triggers: { type: array, items: { $ref: '#/components/schemas/Trigger' } }
+    WorkflowVersionCreate:
+      type: object
+      additionalProperties: false
+      properties:
+        description: { type: string, maxLength: 2000 }
+        definition: { type: object }
+        triggers: { type: array, items: { $ref: '#/components/schemas/Trigger' } }
+    ValidateRequest:
+      type: object
+      required: [definition]
+      additionalProperties: false
+      properties: { definition: { type: object } }
+    ValidateResult:
+      type: object
+      required: [valid, errors]
+      properties:
+        valid: { type: boolean }
+        errors: { type: array, items: { $ref: '#/components/schemas/FieldError' } }
+    WorkflowPage:
+      type: object
+      required: [items]
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/Workflow' } }
+        next_cursor: { type: string }
+
+    Execution:
+      allOf:
+        - { $ref: '#/components/schemas/Meta' }
+        - type: object
+          required: [workflow_id, workflow_version, status, trigger, partition]
+          properties:
+            workflow_id: { type: string }
+            workflow_version: { type: integer }
+            status: { type: string, enum: [queued, running, waiting, succeeded, failed, cancelled, timed_out] }
+            trigger:
+              type: object
+              required: [type]
+              properties:
+                type: { type: string }
+                kind: { type: string }
+                alert_id: { type: string }
+                event_id: { type: string }
+                user: { type: string }
+            context: { type: object }
+            pending_nodes: { type: array, items: { type: string } }
+            outbox: { type: array, items: { type: object } }
+            lease: { type: object }
+            partition: { type: integer }
+            error: { type: string }
+            started_at: { type: string, format: date-time }
+            ended_at: { type: string, format: date-time }
+            deadline_at: { type: string, format: date-time }
+    ExecutionPage:
+      type: object
+      required: [items]
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/Execution' } }
+        next_cursor: { type: string }
+    StepRun:
+      allOf:
+        - { $ref: '#/components/schemas/Meta' }
+        - type: object
+          required: [execution_id, node_id, attempt, status]
+          properties:
+            execution_id: { type: string }
+            node_id: { type: string }
+            action: { type: string }
+            attempt: { type: integer }
+            status: { type: string }
+            input_ref: { type: string }
+            output_ref: { type: string }
+            error: { type: object }
+            duration_ms: { type: integer }
+            idempotency_key: { type: string }
+            parent_step_id: { type: string }
+            actor_type: { type: string }
+    StepRunPage:
+      type: object
+      required: [items]
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/StepRun' } }
+        next_cursor: { type: string }
+
+    ObservableRef:
+      type: object
+      required: [type, value]
+      additionalProperties: false
+      properties:
+        type: { type: string, enum: [ip, domain, url, hash, email, host, user, file_path] }
+        value: { type: string, minLength: 1, maxLength: 2048 }
+        role: { type: string }
+    Alert:
+      allOf:
+        - { $ref: '#/components/schemas/Meta' }
+        - type: object
+          required: [kind, source_id, title, severity, received_at, occurrence_count]
+          properties:
+            event_id: { type: string }
+            kind: { type: string }
+            source_id: { type: string }
+            system: { type: string }
+            external_id: { type: string }
+            external_url: { type: string }
+            fingerprint: { type: string }
+            title: { type: string }
+            description: { type: string }
+            summary: { type: string }
+            severity: { type: integer, minimum: 1, maximum: 5 }
+            original_severity: { type: string }
+            status: { type: string }
+            category: { type: string }
+            tags: { type: array, items: { type: string } }
+            observables: { type: array, items: { $ref: '#/components/schemas/ObservableRef' } }
+            entities: { type: object }
+            mitre: { type: object }
+            verdict: { type: string }
+            ext: { type: object }
+            raw_ref: { type: string }
+            occurred_at: { type: string, format: date-time }
+            received_at: { type: string, format: date-time }
+            last_seen: { type: string, format: date-time }
+            occurrence_count: { type: integer }
+            case_id: { type: string }
+    AlertCreate:
+      type: object
+      required: [title, severity]
+      additionalProperties: false
+      properties:
+        title: { type: string, minLength: 1, maxLength: 500 }
+        description: { type: string }
+        severity: { type: integer, minimum: 1, maximum: 5 }
+        kind: { type: string, enum: [alert, case_event, indicator, asset, custom] }
+        source_id: { type: string }
+        external_id: { type: string }
+        category: { type: string }
+        tags: { type: array, items: { type: string } }
+        observables: { type: array, items: { $ref: '#/components/schemas/ObservableRef' } }
+        mitre: { type: object }
+        ext: { type: object }
+    AlertPage:
+      type: object
+      required: [items]
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/Alert' } }
+        next_cursor: { type: string }
+
+    Case:
+      allOf:
+        - { $ref: '#/components/schemas/Meta' }
+        - type: object
+          required: [title, status, severity]
+          properties:
+            title: { type: string }
+            summary: { type: string }
+            status: { type: string, enum: [open, in_progress, closed] }
+            severity: { type: integer, minimum: 1, maximum: 5 }
+            assignee: { type: string }
+            sla: { type: object }
+            alert_ids: { type: array, items: { type: string } }
+            tags: { type: array, items: { type: string } }
+            verdict: { type: string, enum: ['', true_positive, false_positive, benign, unknown] }
+            external_refs: { type: array, items: { type: object } }
+            closed_at: { type: string, format: date-time }
+    CaseCreate:
+      type: object
+      required: [title]
+      additionalProperties: false
+      properties:
+        title: { type: string, minLength: 1, maxLength: 300 }
+        summary: { type: string }
+        severity: { type: integer, minimum: 1, maximum: 5, default: 3 }
+        assignee: { type: string }
+        tags: { type: array, items: { type: string } }
+    CasePatch:
+      type: object
+      additionalProperties: false
+      properties:
+        title: { type: string, minLength: 1, maxLength: 300 }
+        summary: { type: string }
+        status: { type: string, enum: [open, in_progress, closed] }
+        severity: { type: integer, minimum: 1, maximum: 5 }
+        assignee: { type: string }
+        tags: { type: array, items: { type: string } }
+        verdict: { type: string, enum: ['', true_positive, false_positive, benign, unknown] }
+    CasePage:
+      type: object
+      required: [items]
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/Case' } }
+        next_cursor: { type: string }
+    CaseTask:
+      allOf:
+        - { $ref: '#/components/schemas/Meta' }
+        - type: object
+          required: [case_id, title, status]
+          properties:
+            case_id: { type: string }
+            title: { type: string }
+            description: { type: string }
+            status: { type: string }
+            assignee: { type: string }
+            due_at: { type: string, format: date-time }
+    CaseTaskCreate:
+      type: object
+      required: [title]
+      additionalProperties: false
+      properties:
+        title: { type: string, minLength: 1, maxLength: 300 }
+        description: { type: string }
+        assignee: { type: string }
+        due_at: { type: string, format: date-time }
+    CaseTaskPage:
+      type: object
+      required: [items]
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/CaseTask' } }
+        next_cursor: { type: string }
+    CaseObservableCreate:
+      type: object
+      required: [type, value]
+      additionalProperties: false
+      properties:
+        type: { type: string, enum: [ip, domain, url, hash, email, host, user, file_path] }
+        value: { type: string, minLength: 1, maxLength: 2048 }
+    Observable:
+      allOf:
+        - { $ref: '#/components/schemas/Meta' }
+        - type: object
+          required: [type, value, first_seen, last_seen]
+          properties:
+            type: { type: string }
+            value: { type: string }
+            first_seen: { type: string, format: date-time }
+            last_seen: { type: string, format: date-time }
+            reputation: { type: object }
+            case_ids: { type: array, items: { type: string } }
+    ObservablePage:
+      type: object
+      required: [items]
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/Observable' } }
+        next_cursor: { type: string }
+    TimelineEvent:
+      allOf:
+        - { $ref: '#/components/schemas/Meta' }
+        - type: object
+          required: [subject_id, event_type]
+          properties:
+            subject_id: { type: string }
+            event_type: { type: string }
+            actor: { type: string }
+            data: { type: object }
+    TimelinePage:
+      type: object
+      required: [items]
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/TimelineEvent' } }
+        next_cursor: { type: string }
+
+    Connection:
+      allOf:
+        - { $ref: '#/components/schemas/Meta' }
+        - type: object
+          required: [connector_id, name, auth_type]
+          properties:
+            connector_id: { type: string }
+            name: { type: string }
+            auth_type: { type: string }
+            secret_refs: { type: object }
+            config: { type: object }
+    ConnectionCreate:
+      type: object
+      required: [connector_id, name, auth_type]
+      additionalProperties: false
+      properties:
+        connector_id: { type: string, minLength: 1, maxLength: 100 }
+        name: { type: string, minLength: 1, maxLength: 200 }
+        auth_type: { type: string, enum: [none, api_key, basic, bearer, oauth2_client_credentials] }
+        secret_refs: { type: object, description: Map of credential name to the NAME of a stored secret. Never the secret itself. }
+        config: { type: object }
+    ConnectionPage:
+      type: object
+      required: [items]
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/Connection' } }
+        next_cursor: { type: string }
