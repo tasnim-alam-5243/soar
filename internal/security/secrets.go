@@ -367,35 +367,90 @@ func ConnectionConsumers(conn domain.Connection) []string {
 	return out
 }
 
-// soleHost returns the host of the absolute http(s) URLs in v (searched through nested
-// maps and lists) when they all name the same one, otherwise "".
+// soleHost returns the one host every endpoint in a connection's configuration names,
+// or "" (no host attribute). It fails closed: every value that looks like an endpoint
+// (it contains "://", starts with "//", or sits under an endpoint-like key such as
+// host, url, server or endpoint, at any depth) must parse strictly to a host, and all
+// of them must agree. Anything a connector or an HTTP library could read differently
+// (user info, backslashes, spaces, an upper-case or non-http scheme, a bare host
+// elsewhere) withholds the attribute, so a host-pinned secret is refused.
 func soleHost(v any) string {
 	hosts := map[string]bool{}
-	var walk func(any)
-	walk = func(x any) {
+	ok := true
+	var walk func(key string, x any)
+	walk = func(key string, x any) {
 		switch t := x.(type) {
 		case string:
-			if u, err := url.Parse(strings.TrimSpace(t)); err == nil && (u.Scheme == "http" || u.Scheme == "https") && u.Hostname() != "" {
-				hosts[strings.ToLower(u.Hostname())] = true
+			urlish := strings.Contains(t, "://") || strings.HasPrefix(t, "//") || strings.Contains(t, `:\`)
+			if !urlish && !endpointKey(key) {
+				return
 			}
+			h, good := strictHost(t, urlish)
+			if !good {
+				ok = false
+				return
+			}
+			hosts[h] = true
 		case map[string]any:
-			for _, e := range t {
-				walk(e)
+			for k, e := range t {
+				walk(k, e)
 			}
 		case []any:
 			for _, e := range t {
-				walk(e)
+				walk(key, e)
 			}
 		}
 	}
-	walk(v)
-	if len(hosts) != 1 {
+	walk("", v)
+	if !ok || len(hosts) != 1 {
 		return ""
 	}
 	for h := range hosts {
 		return h
 	}
 	return ""
+}
+
+// endpointKey reports whether a configuration key names where requests go.
+func endpointKey(key string) bool {
+	k := strings.ToLower(key)
+	for _, s := range []string{"url", "uri", "host", "endpoint", "server", "domain", "addr", "base"} {
+		if strings.Contains(k, s) {
+			return true
+		}
+	}
+	return false
+}
+
+var bareHostRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*(:[0-9]{1,5})?$`)
+
+// strictHost parses an endpoint the strict way: an absolute http(s) URL with a plain
+// host (no user info), or, under an endpoint key, a bare host[:port].
+func strictHost(s string, urlish bool) (string, bool) {
+	for _, r := range s {
+		if r <= ' ' || r == '\\' || r == 0x7f || r == '@' {
+			return "", false
+		}
+	}
+	if !urlish {
+		if !bareHostRe.MatchString(s) {
+			return "", false
+		}
+		h, _, _ := strings.Cut(s, ":")
+		return h, true
+	}
+	if !strings.HasPrefix(s, "https://") && !strings.HasPrefix(s, "http://") {
+		return "", false
+	}
+	u, err := url.Parse(s)
+	if err != nil || u.User != nil || u.Opaque != "" || u.Hostname() == "" {
+		return "", false
+	}
+	h := strings.ToLower(u.Hostname()) // DNS names are case-insensitive
+	if strings.HasSuffix(h, ".") {
+		return "", false
+	}
+	return h, true
 }
 
 // ScopeAllows reports whether a secret's scope (comma-separated entries; empty =

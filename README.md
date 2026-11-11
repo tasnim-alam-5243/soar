@@ -386,7 +386,8 @@ limits throughput" and `make nats-relaxed`.
   (`SOAR_SECRET_*` anywhere; `SOAR_WAZUH_INDEXER_*` for connections; `SOAR_SOURCE_TOKEN_*`/`SOAR_SOURCE_SECRET_*`
   for ingest auth), checked when a connection or source is saved and again at runtime, so a connection can never
   read `SOAR_MASTER_KEY` or a platform password. A stored secret's `scope` limits who may use it: `host:<name>` (only
-  connections all of whose URLs are on that host; use it for credentials that matter), `connection:<connection id>`
+  connections whose every endpoint value parses strictly to that host, else none; use it for credentials that
+  matter), `connection:<connection id>`
   (names are not unique), a connector id,
   `workflows`, `ingest` or `source:<name>`; scoped secrets resolve only for a named use (worker, collector, ingest).
   Unscoped secrets can be bound by anyone allowed to create connections. Workflow parameters use stored secrets only.

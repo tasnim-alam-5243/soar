@@ -401,3 +401,31 @@ func TestHostPinnedSecretFollowsTheEndpointNotTheConnector(t *testing.T) {
 		}
 	}
 }
+
+// The host attribute fails closed: any endpoint-looking value that parses ambiguously,
+// or names another host in any form, withholds it.
+func TestSoleHostFailsClosed(t *testing.T) {
+	for _, c := range []struct {
+		cfg  domain.JSON
+		want string
+	}{
+		{domain.JSON{"base_url": "https://IRIS.example.com:8443/api"}, "iris.example.com"},
+		{domain.JSON{"base_url": "https://iris.example.com", "tenant": "acme", "timeout": 30}, "iris.example.com"},
+		{domain.JSON{"base_url": "https://iris.example.com", "host": "attacker.invalid"}, ""},
+		{domain.JSON{"base_url": "https://iris.example.com", "nested": map[string]any{"server": "attacker.invalid:443"}}, ""},
+		{domain.JSON{"base_url": "https://user@iris.example.com"}, ""},
+		{domain.JSON{"base_url": `https://iris.example.com\@attacker.invalid`}, ""},
+		{domain.JSON{"base_url": " https://iris.example.com"}, ""},
+		{domain.JSON{"base_url": "HTTPS://iris.example.com"}, ""},
+		{domain.JSON{"base_url": "ftp://iris.example.com"}, ""},
+		{domain.JSON{"base_url": "//attacker.invalid/x"}, ""},
+		{domain.JSON{"base_url": "https://iris.example.com.", "x": 1}, ""},
+		{domain.JSON{"base_url": "https://iris.example.com", "note": "see https://attacker.invalid/doc"}, ""},
+		{domain.JSON{"host": "iris.example.com", "port": 443}, "iris.example.com"},
+		{domain.JSON{"timeout": 30}, ""},
+	} {
+		if got := soleHost(map[string]any(c.cfg)); got != c.want {
+			t.Errorf("%v: host %q, want %q", c.cfg, got, c.want)
+		}
+	}
+}
