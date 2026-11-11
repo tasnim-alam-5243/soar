@@ -507,7 +507,7 @@ func (c *compiler) node(n *Node, m map[string]any, path string) {
 		if raw, ok := m["approvers"]; ok {
 			list := toStrings(raw)
 			if len(list) == 0 {
-				c.add(path+".approvers", "must be a non-empty list of roles or user names")
+				c.add(path+".approvers", "must be a non-empty list of roles, user names (user:<name>) or principal ids (oidc:<sub>, prn_...)")
 			}
 			n.Approvers = list
 		}

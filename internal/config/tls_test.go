@@ -67,3 +67,33 @@ func TestTLSSettings(t *testing.T) {
 		}
 	}
 }
+
+// The runner channel carries decrypted secrets: plaintext only to this host or by an
+// explicit choice for a private network.
+func TestRunnerChannelNeedsTLSOrAnExplicitChoice(t *testing.T) {
+	f := tlstest.New(t)
+	load := func(kv ...string) error {
+		m := map[string]string{"SOAR_OS_URLS": "http://os:9200", "SOAR_NATS_URL": "nats://n:4222"}
+		for i := 0; i+1 < len(kv); i += 2 {
+			m[kv[i]] = kv[i+1]
+		}
+		_, err := Load(env(m))
+		return err
+	}
+	if err := load("SOAR_RUNNER_ADDR", "runner:50051"); err == nil || !strings.Contains(err.Error(), "SOAR_RUNNER_INSECURE") {
+		t.Errorf("a remote runner without TLS must be refused: %v", err)
+	}
+	for _, ok := range [][]string{
+		{"SOAR_RUNNER_ADDR", "runner:50051", "SOAR_RUNNER_INSECURE", "true"},
+		{"SOAR_RUNNER_ADDR", "127.0.0.1:50051"},
+		{"SOAR_RUNNER_ADDR", "localhost:50051"},
+		{"SOAR_RUNNER_ADDR", "runner:50051", "SOAR_RUNNER_CA_FILE", f.CA, "SOAR_RUNNER_CERT_FILE", f.ClientCert, "SOAR_RUNNER_KEY_FILE", f.ClientKey},
+	} {
+		if err := load(ok...); err != nil {
+			t.Errorf("%v: %v", ok, err)
+		}
+	}
+	if err := load("SOAR_RUNNER_ADDR", "runner:50051", "SOAR_RUNNER_CERT_FILE", f.ClientCert); err == nil {
+		t.Error("a client certificate without its key must be refused")
+	}
+}

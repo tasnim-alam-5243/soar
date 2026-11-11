@@ -4,6 +4,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
+	"net"
 	"os"
 )
 
@@ -80,4 +81,12 @@ func loadPool(file string) (*x509.CertPool, error) {
 		return nil, fmt.Errorf("%s contains no PEM certificate", file)
 	}
 	return pool, nil
+}
+
+func isLoopback(host string) bool {
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }

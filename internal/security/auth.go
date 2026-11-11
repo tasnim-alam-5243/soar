@@ -84,10 +84,17 @@ func (p Principal) Can(perm string) bool {
 	return false
 }
 
-// HasAny reports whether the principal holds one of the roles or is named in names.
+// HasAny reports whether the principal may act for one of the entries (an approval's
+// approvers): a role it holds (admins hold them all here), its principal id
+// ("oidc:<sub>", "prn_..."), or, for an OIDC user, its user name ("alice" or
+// "user:alice"). API keys and service principals are never matched by name: their
+// names are labels chosen by whoever created them and could copy a user's name.
 func (p Principal) HasAny(names []string) bool {
 	for _, n := range names {
-		if n == p.Name || n == p.ID {
+		if n == p.ID && p.ID != "" {
+			return true
+		}
+		if p.Type == "user" && p.Name != "" && (n == p.Name || n == "user:"+p.Name) {
 			return true
 		}
 		for _, r := range p.Roles {
@@ -157,11 +164,16 @@ func (a *Authenticator) Authenticate(ctx context.Context, token string) (Princip
 	if err != nil {
 		return Principal{}, ErrUnauthenticated
 	}
+	// The name is what approvers lists and audit records show. An email address is only
+	// trusted when the identity provider verified it (anyone can type one in).
 	name, _ := claims["preferred_username"].(string)
-	if name == "" {
+	if verified, _ := claims["email_verified"].(bool); name == "" && verified {
 		name, _ = claims["email"].(string)
 	}
 	sub, _ := claims["sub"].(string)
+	if sub == "" {
+		return Principal{}, ErrUnauthenticated // no stable identity
+	}
 	if name == "" {
 		name = sub
 	}

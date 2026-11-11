@@ -191,8 +191,8 @@ type rig struct {
 
 func newRig(t *testing.T) *rig {
 	t.Helper()
-	t.Setenv("T_USER", "reader")
-	t.Setenv("T_PASS", "pw")
+	t.Setenv("SOAR_SECRET_T_USER", "reader")
+	t.Setenv("SOAR_SECRET_T_PASS", "pw")
 	idx := &indexer{user: "reader"}
 	srv := httptest.NewServer(idx)
 	t.Cleanup(srv.Close)
@@ -209,7 +209,7 @@ func newRig(t *testing.T) *rig {
 	ctx := context.Background()
 	if _, err := st.Connections.Create(ctx, domain.Connection{
 		Meta: domain.NewMeta("con"), ConnectorID: "wazuh-indexer", Name: "wazuh_indexer", AuthType: "basic",
-		SecretRefs: domain.JSON{"username": "env:T_USER", "password": "env:T_PASS"}, Config: domain.JSON{"base_url": srv.URL},
+		SecretRefs: domain.JSON{"username": "env:SOAR_SECRET_T_USER", "password": "env:SOAR_SECRET_T_PASS"}, Config: domain.JSON{"base_url": srv.URL},
 	}); err != nil {
 		t.Fatal(err)
 	}

@@ -28,6 +28,7 @@ import (
 	"github.com/yourorg/soar/internal/engine"
 	"github.com/yourorg/soar/internal/obs"
 	"github.com/yourorg/soar/internal/queue"
+	"github.com/yourorg/soar/internal/security"
 	"github.com/yourorg/soar/internal/store"
 )
 
@@ -416,7 +417,7 @@ func (w *Worker) run(ctx context.Context, act actions.Action, man actions.Manife
 			return nil, actions.Errf("missing_secret", false, "no secret store is configured")
 		}
 		resolved, err := engine.ResolveSecrets(params, func(n string) (string, error) {
-			v, err := w.Secrets.Resolve(ctx, n)
+			v, err := w.resolveSecret(ctx, n, security.UseWorkflow, "workflows")
 			if err == nil {
 				used.add(v)
 				w.Audit.Record(ctx, w.auditRecord(sp, audit.ActionSecretRead, "secrets/"+n))
@@ -535,7 +536,7 @@ func (w *Worker) connection(ctx context.Context, man actions.Manifest, name stri
 		if w.Secrets == nil {
 			return nil, actions.Errf("missing_secret", false, "no secret store is configured")
 		}
-		v, err := w.Secrets.Resolve(ctx, r)
+		v, err := w.resolveSecret(ctx, r, security.UseConnection, c.ConnectorID)
 		if err != nil {
 			return nil, actions.Errf("missing_secret", false, "connection %q secret %q: %v", c.Name, key, err)
 		}
@@ -603,4 +604,21 @@ func ClassOf(m actions.Manifest) string {
 		return actions.ClassPython
 	}
 	return actions.ClassBuiltin
+}
+
+// scopedSecrets is the use-aware resolution of security.SecretStore.
+type scopedSecrets interface {
+	ResolveFor(ctx context.Context, ref, use, consumer string) (string, error)
+}
+
+// resolveSecret resolves ref for one use: env: references must fit the use and a
+// scoped secret must list the consumer (a connector id, or "workflows").
+func (w *Worker) resolveSecret(ctx context.Context, ref, use, consumer string) (string, error) {
+	if s, ok := w.Secrets.(scopedSecrets); ok {
+		return s.ResolveFor(ctx, ref, use, consumer)
+	}
+	if name, isEnv := strings.CutPrefix(ref, "env:"); isEnv && (use == security.UseWorkflow || !security.EnvRefAllowed(name, use)) {
+		return "", fmt.Errorf("secret reference %q is not allowed here", ref)
+	}
+	return w.Secrets.Resolve(ctx, ref)
 }

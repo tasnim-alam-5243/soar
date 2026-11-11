@@ -3,6 +3,8 @@ package runner
 import (
 	"bufio"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,20 +13,24 @@ import (
 	"time"
 
 	"github.com/yourorg/soar/internal/actions"
+	"github.com/yourorg/soar/internal/tlstest"
 )
 
 // startRunner launches the real Python runner (runner/python/.venv) on a free port.
 // The test is skipped when the virtualenv is missing (`make runner-venv` creates it).
-func startRunner(t *testing.T) string {
+func startRunner(t *testing.T, extra ...string) string {
 	t.Helper()
 	root, _ := filepath.Abs("../../runner/python")
 	py := filepath.Join(root, ".venv", "bin", "python")
 	if _, err := os.Stat(py); err != nil {
 		t.Skip("runner virtualenv not found; run `make runner-venv` to enable this test")
 	}
-	cmd := exec.Command(py, "-m", "soar_runner.server", "--listen", "127.0.0.1:0",
+	args := append([]string{
+		"-m", "soar_runner.server", "--listen", "127.0.0.1:0",
 		"--integrations", filepath.Join(root, "tests", "fixtures", "integrations"),
-		"--scripts", filepath.Join(root, "tests", "fixtures", "scripts"), "--workers", "4")
+		"--scripts", filepath.Join(root, "tests", "fixtures", "scripts"), "--workers", "4",
+	}, extra...)
+	cmd := exec.Command(py, args...)
 	cmd.Dir = root
 	out, err := cmd.StdoutPipe()
 	if err != nil {
@@ -55,7 +61,7 @@ func startRunner(t *testing.T) string {
 
 func TestExecuteThroughRealRunner(t *testing.T) {
 	addr := startRunner(t)
-	c, err := Dial(addr)
+	c, err := Dial(addr, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -99,5 +105,41 @@ func TestExecuteThroughRealRunner(t *testing.T) {
 	dec, err := c.Filter(ctx, "filters/odd.py", []map[string]any{{"n": 1}, {"n": 4}}, 5*time.Second)
 	if err != nil || dec[0] != "drop" || dec[1] != "keep" {
 		t.Fatalf("filter %v %v", dec, err)
+	}
+}
+
+// The worker sends decrypted connection secrets to the runner, so the channel can be
+// mutually authenticated TLS: only a client with a certificate from the CA gets in.
+func TestRunnerOverMutualTLS(t *testing.T) {
+	f := tlstest.New(t)
+	addr := startRunner(t, "--tls-cert", f.ServerCert, "--tls-key", f.ServerKey, "--tls-client-ca", f.CA)
+	caPEM, err := os.ReadFile(f.CA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool := x509.NewCertPool()
+	pool.AppendCertsFromPEM(caPEM)
+	pair, err := tls.LoadX509KeyPair(f.ClientCert, f.ClientKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ping := func(tc *tls.Config) error {
+		c, err := Dial(addr, tc)
+		if err != nil {
+			return err
+		}
+		defer c.Close()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		return c.Ping(ctx)
+	}
+	if err := ping(&tls.Config{RootCAs: pool, Certificates: []tls.Certificate{pair}, MinVersion: tls.VersionTLS12}); err != nil {
+		t.Fatalf("CA + client certificate: %v", err)
+	}
+	if err := ping(&tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}); err == nil {
+		t.Error("a client without a certificate must be refused")
+	}
+	if err := ping(nil); err == nil {
+		t.Error("a plaintext client must be refused by a TLS runner")
 	}
 }

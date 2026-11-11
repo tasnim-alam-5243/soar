@@ -70,7 +70,13 @@ func Run(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 		s.WithAuth(a)
 		bctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 		for i := 0; i < 15; i++ {
-			if err = EnsureBootstrapKey(bctx, st, cfg.BootstrapKey); err == nil {
+			var disabled bool
+			if disabled, err = EnsureBootstrapKey(bctx, st, cfg.BootstrapKey); err == nil {
+				if disabled {
+					log.Warn("SOAR_BOOTSTRAP_API_KEY is set but its principal is disabled; it stays disabled (remove the variable)")
+				} else {
+					log.Warn("SOAR_BOOTSTRAP_API_KEY grants admin rights: remove it and restart the api once real admins exist")
+				}
 				break
 			}
 			time.Sleep(2 * time.Second)

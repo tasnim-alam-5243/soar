@@ -399,6 +399,9 @@ func (s *Server) putSecret(w http.ResponseWriter, r *http.Request) error {
 	v.required("value", in.Value)
 	v.maxLen("value", in.Value, 65536)
 	v.maxLen("scope", in.Scope, 200)
+	if !security.ValidScope(in.Scope) {
+		v.add("scope", "a comma-separated list of connector ids and/or \"workflows\" (empty: usable anywhere)")
+	}
 	if err := v.err(); err != nil {
 		return err
 	}

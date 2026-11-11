@@ -12,6 +12,7 @@ import (
 	"github.com/yourorg/soar/internal/actions"
 	"github.com/yourorg/soar/internal/audit"
 	"github.com/yourorg/soar/internal/domain"
+	"github.com/yourorg/soar/internal/security"
 	"github.com/yourorg/soar/internal/store"
 )
 
@@ -137,5 +138,28 @@ nodes:
 	page, _ := f.st.Audit.List(f.ctx, store.ListQuery{Limit: 10})
 	if len(page.Items) != 0 {
 		t.Errorf("a dry run must not be audited as a side effect: %+v", page.Items)
+	}
+}
+
+// A secret scoped to a connector cannot be pulled into workflow parameters.
+func TestFlowScopedSecretIsRefusedOutsideItsScope(t *testing.T) {
+	f := newFlow(t, flowOpts{})
+	ss := f.w.Secrets.(*security.SecretStore)
+	if _, err := ss.Put(f.ctx, "iris_only", "iris-value-123", "dfir_iris"); err != nil {
+		t.Fatal(err)
+	}
+	wf := f.workflow("scoped-secret", `
+nodes:
+  - id: c
+    action: test.count
+    params: { token: 'secrets.iris_only' }
+`)
+	exe := f.done(f.run(wf, nil, false))
+	n := nodeState(t, exe, "c")
+	if exe.Status != "failed" || n.Error == nil || n.Error.Code != "missing_secret" || !strings.Contains(n.Error.Message, "scoped") {
+		t.Fatalf("want missing_secret (scoped), got %s %+v", exe.Status, n.Error)
+	}
+	if v, _ := f.counts.Load(exe.ID + ":c:1"); v != nil {
+		t.Error("the action ran with a secret outside its scope")
 	}
 }

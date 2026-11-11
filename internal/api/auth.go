@@ -411,14 +411,36 @@ func (s *Server) me(w http.ResponseWriter, r *http.Request) error {
 	})
 }
 
+// BootstrapPrincipalID is the id of the principal SOAR_BOOTSTRAP_API_KEY installs.
+var BootstrapPrincipalID = domain.DeterministicID("prn", "api_key", "bootstrap-admin")
+
 // EnsureBootstrapKey creates an admin API-key principal from SOAR_BOOTSTRAP_API_KEY
-// once, so a fresh installation can be administered before OIDC users exist.
-func EnsureBootstrapKey(ctx context.Context, st *store.Store, key string) error {
+// once, so a fresh installation can be administered before OIDC users exist. Later
+// starts only follow a changed key (rotation); what an admin did to the principal
+// stays: a disabled bootstrap key is not re-enabled and changed roles are kept. It
+// reports whether the principal is disabled.
+func EnsureBootstrapKey(ctx context.Context, st *store.Store, key string) (disabled bool, err error) {
 	if key == "" {
-		return nil
+		return false, nil
 	}
-	doc := domain.Principal{Meta: domain.NewMeta("prn"), Type: "api_key", Name: "bootstrap-admin", Roles: []string{security.RoleAdmin}, KeyHash: security.HashAPIKey(key)}
-	doc.ID = domain.DeterministicID("prn", "api_key", "bootstrap-admin")
-	_, err := st.Principals.Put(ctx, doc) // Put keeps it in step with the configured key
-	return err
+	hash := security.HashAPIKey(key)
+	cur, _, err := st.Principals.Get(ctx, BootstrapPrincipalID)
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		doc := domain.Principal{Meta: domain.NewMeta("prn"), Type: "api_key", Name: "bootstrap-admin", Roles: []string{security.RoleAdmin}, KeyHash: hash}
+		doc.ID = BootstrapPrincipalID
+		if _, err := st.Principals.Create(ctx, doc); err != nil && !errors.Is(err, store.ErrAlreadyExists) {
+			return false, err
+		}
+		return false, nil
+	case err != nil:
+		return false, err
+	case cur.KeyHash == hash:
+		return cur.Disabled, nil
+	}
+	p, _, err := st.Principals.Update(ctx, BootstrapPrincipalID, func(p *domain.Principal) error {
+		p.KeyHash = hash // a rotated key replaces the old one; Disabled and Roles are left alone
+		return nil
+	})
+	return p.Disabled, err
 }

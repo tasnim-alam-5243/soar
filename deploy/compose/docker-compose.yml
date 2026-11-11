@@ -187,6 +187,9 @@ services:
     environment:
       <<: *soar-env
       SOAR_RUNNER_ADDR: runner:50051
+      # The runner network is internal (no other containers, no outside access), so the dev stack talks
+      # plain gRPC to it; production uses TLS (deploy/prod). Decrypted connection secrets cross this channel.
+      SOAR_RUNNER_INSECURE: "${SOAR_RUNNER_INSECURE:-true}"
       SOAR_WORKER_CONCURRENCY: "${SOAR_WORKER_CONCURRENCY:-16}"
     networks: [default, runner]
     healthcheck: { <<: *hc, test: ["CMD", "/soar", "healthcheck", "http://127.0.0.1:8085/readyz"] }

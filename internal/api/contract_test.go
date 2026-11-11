@@ -872,7 +872,7 @@ func TestContract(t *testing.T) {
 		h.do("POST", "/sources", map[string]any{"name": "acme", "adapter": "poll_http", "parser": "json", "mapping": "wazuh_alert@1", "schedule": "whenever"}, 422)
 		src := map[string]any{
 			"name": "acme-siem", "adapter": "webhook", "parser": "json", "mapping": "wazuh_alert@1", "filters": []any{"wazuh-default@1"},
-			"auth": map[string]any{"type": "token", "token_ref": "env:ACME_TOKEN"}, "dedup": map[string]any{"window": "5m"}, "rate_limit": map[string]any{"rps": 50, "burst": 100},
+			"auth": map[string]any{"type": "token", "token_ref": "env:SOAR_SOURCE_TOKEN_ACME"}, "dedup": map[string]any{"window": "5m"}, "rate_limit": map[string]any{"rps": 50, "burst": 100},
 		}
 		created, chdr := h.do("POST", "/sources", src, 201)
 		sid := sa(created, "id")

@@ -20,6 +20,7 @@ import (
 	"github.com/yourorg/soar/internal/ingest/pack"
 	"github.com/yourorg/soar/internal/ingest/parsers"
 	"github.com/yourorg/soar/internal/queue"
+	"github.com/yourorg/soar/internal/security"
 	"github.com/yourorg/soar/internal/store"
 )
 
@@ -144,8 +145,13 @@ func (s *Server) validateSource(ctx context.Context, d domain.Source) error {
 			v.add("auth.type", "webhook sources need auth.type token, hmac or none")
 		}
 		for _, k := range []string{"token_ref", "secret_ref"} {
-			if ref, ok := d.Auth[k].(string); ok && !envRefRe.MatchString(ref) {
-				v.add("auth."+k, "must reference a secret as env:NAME (named secrets arrive with Step 9); never paste the secret")
+			if ref, ok := d.Auth[k].(string); ok {
+				switch {
+				case !envRefRe.MatchString(ref):
+					v.add("auth."+k, "must reference a secret as env:NAME; never paste the secret")
+				case !security.EnvRefAllowed(strings.TrimPrefix(ref, "env:"), security.UseIngestAuth):
+					v.add("auth."+k, "%s", security.EnvRefRule(security.UseIngestAuth))
+				}
 			}
 		}
 	} else {

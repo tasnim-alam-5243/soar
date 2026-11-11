@@ -382,6 +382,16 @@ limits throughput" and `make nats-relaxed`.
   `workflow`, request_id = the step's idempotency key). `GET /audit`.
 * **Secrets never leave the worker:** values a step used are replaced with `***` in its output, error and log lines
   (also their base64 form, e.g. an echoed Basic authorization header).
+* **Where secrets may come from:** `env:NAME` references reach only variables meant as integration secrets
+  (`SOAR_SECRET_*` anywhere; `SOAR_WAZUH_INDEXER_*` for connections; `SOAR_SOURCE_TOKEN_*`/`SOAR_SOURCE_SECRET_*`
+  for ingest auth), checked when a connection or source is saved and again at runtime, so a connection can never
+  read `SOAR_MASTER_KEY` or a platform password. A stored secret's `scope` (connector ids and/or `workflows`) limits
+  who may use it. Workflow parameters (`secrets.<name>`) use stored secrets only.
+* **Worker to runner:** the channel carries decrypted secrets, so it is TLS (mTLS with `SOAR_RUNNER_CERT_FILE`)
+  unless the runner is on the same host or `SOAR_RUNNER_INSECURE=true` says the network is private (the dev stack).
+* **Bootstrap key:** created once; restarting the api never re-enables a disabled bootstrap key or resets its roles.
+* **Approvers** match by role, principal id (`oidc:<sub>`, `prn_...`) or OIDC user name (`alice`, `user:alice`);
+  API keys never match by name, and an OIDC email counts as a name only when verified.
 * **Limits:** request bodies 1 MiB (evidence 25 MB), JSON nesting 64 levels (API and ingest), CEL cost limits.
 * **TLS / mTLS** (all optional): `SOAR_OS_CA_FILE`, `SOAR_OS_CERT_FILE` + `SOAR_OS_KEY_FILE` (OpenSearch),
   `SOAR_NATS_CA_FILE`, `SOAR_NATS_CERT_FILE` + `SOAR_NATS_KEY_FILE` (NATS), `SOAR_TLS_CERT_FILE` + `SOAR_TLS_KEY_FILE`

@@ -53,19 +53,21 @@ type Config struct {
 	ProcessorWorkers int   // concurrent fetch loops per processor
 
 	// Step 7: actions, runner, object storage.
-	RunnerAddr        string   // Python runner gRPC address (host:port); empty disables python actions
-	BlobEndpoint      string   // S3-compatible endpoint; empty uses BlobDir (or no object storage)
-	BlobAccessKey     string   // secret
-	BlobSecretKey     string   // secret
-	BlobRegion        string   // default us-east-1
-	BlobSSE           bool     // request server-side encryption
-	BlobDir           string   // filesystem object store for single-node development
-	WorkerPriorities  []string // priorities this worker serves (default all)
-	WorkerClasses     []string // action classes this worker serves (default all)
-	WorkerConcurrency int      // steps in flight for the normal priority (critical gets half, bulk a quarter)
-	HTTPAllowLoopback bool     // let http.request reach loopback addresses (tests, local integrations)
-	IntegrationsDir   string   // load integration packages from disk instead of the built-in ones
-	PolicyFile        string   // action policy rules (spec 20.1); missing file = defaults
+	RunnerAddr        string      // Python runner gRPC address (host:port); empty disables python actions
+	RunnerTLS         *tls.Config // TLS (mTLS with a client certificate) to the runner; nil: plaintext
+	RunnerInsecure    bool        // plaintext to a runner that is not on this host (private network only)
+	BlobEndpoint      string      // S3-compatible endpoint; empty uses BlobDir (or no object storage)
+	BlobAccessKey     string      // secret
+	BlobSecretKey     string      // secret
+	BlobRegion        string      // default us-east-1
+	BlobSSE           bool        // request server-side encryption
+	BlobDir           string      // filesystem object store for single-node development
+	WorkerPriorities  []string    // priorities this worker serves (default all)
+	WorkerClasses     []string    // action classes this worker serves (default all)
+	WorkerConcurrency int         // steps in flight for the normal priority (critical gets half, bulk a quarter)
+	HTTPAllowLoopback bool        // let http.request reach loopback addresses (tests, local integrations)
+	IntegrationsDir   string      // load integration packages from disk instead of the built-in ones
+	PolicyFile        string      // action policy rules (spec 20.1); missing file = defaults
 
 	// Step 9: security.
 	MasterKeyID   string // id of the secret-encryption master key (rotation)
@@ -214,9 +216,21 @@ func Load(lookup func(string) (string, bool)) (Config, error) {
 
 	// Step 7
 	c.RunnerAddr = get("SOAR_RUNNER_ADDR")
+	c.RunnerInsecure = boolEnv(get("SOAR_RUNNER_INSECURE"), false, "SOAR_RUNNER_INSECURE", bad)
+	if t, err := clientTLS(get("SOAR_RUNNER_CA_FILE"), get("SOAR_RUNNER_CERT_FILE"), get("SOAR_RUNNER_KEY_FILE"), false, "SOAR_RUNNER"); err != nil {
+		bad("%v", err)
+	} else {
+		c.RunnerTLS = t
+	}
 	if c.RunnerAddr != "" {
-		if _, _, err := net.SplitHostPort(c.RunnerAddr); err != nil {
+		host, _, err := net.SplitHostPort(c.RunnerAddr)
+		switch {
+		case err != nil:
 			bad("SOAR_RUNNER_ADDR must look like host:port, got %q", c.RunnerAddr)
+		case c.RunnerTLS == nil && !c.RunnerInsecure && !isLoopback(host):
+			// the worker sends decrypted connection secrets to the runner
+			bad("SOAR_RUNNER_ADDR %s is not on this host: set SOAR_RUNNER_CA_FILE (plus SOAR_RUNNER_CERT_FILE/SOAR_RUNNER_KEY_FILE for mTLS), "+
+				"or SOAR_RUNNER_INSECURE=true if the runner network is private (the secrets cross it in plain text)", c.RunnerAddr)
 		}
 	}
 	c.BlobEndpoint = get("SOAR_BLOB_ENDPOINT")
@@ -362,6 +376,7 @@ func (c Config) LogValue() slog.Value {
 		slog.Int("nats_replicas", c.NATSReplicas),
 		slog.Int("processor_workers", c.ProcessorWorkers),
 		slog.String("runner_addr", c.RunnerAddr),
+		slog.String("runner_tls", tlsMode(c.RunnerTLS)),
 		slog.String("blob_endpoint", Redact(c.BlobEndpoint)),
 		slog.Bool("blob_credentials", c.BlobAccessKey != ""),
 		slog.String("blob_dir", c.BlobDir),

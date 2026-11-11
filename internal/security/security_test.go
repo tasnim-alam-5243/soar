@@ -78,8 +78,8 @@ func TestEnvelopeEncryptionAndRotation(t *testing.T) {
 		t.Fatal("modified ciphertext must fail authentication")
 	}
 
-	t.Setenv("SOAR_TEST_SECRET", "from-env")
-	if v, _ := ss.Resolve(ctx, "env:SOAR_TEST_SECRET"); v != "from-env" {
+	t.Setenv("SOAR_SECRET_TEST", "from-env")
+	if v, _ := ss.Resolve(ctx, "env:SOAR_SECRET_TEST"); v != "from-env" {
 		t.Fatal("env references must keep working")
 	}
 	if _, err := ss.Put(ctx, "9bad", "x", ""); err == nil {
@@ -223,8 +223,134 @@ func TestAPIKeys(t *testing.T) {
 	if !admin.Can("anything:at_all") || !admin.HasAny([]string{"analyst"}) {
 		t.Error("admin")
 	}
-	viewer := Principal{Name: "bob", Roles: []string{RoleViewer}}
-	if viewer.Can("cases:write") || !viewer.HasAny([]string{"bob"}) || viewer.HasAny([]string{"analyst"}) {
+	viewer := Principal{ID: "oidc:u-bob", Name: "bob", Type: "user", Roles: []string{RoleViewer}}
+	if viewer.Can("cases:write") || !viewer.HasAny([]string{"bob"}) || !viewer.HasAny([]string{"user:bob"}) ||
+		!viewer.HasAny([]string{"oidc:u-bob"}) || viewer.HasAny([]string{"analyst"}) {
 		t.Error("viewer")
+	}
+	// an API key labelled like a user never stands in for that user
+	labelled := Principal{ID: "prn_k", Name: "bob", Type: "api_key", Roles: []string{RoleAnalyst}}
+	if labelled.HasAny([]string{"bob"}) || labelled.HasAny([]string{"user:bob"}) || !labelled.HasAny([]string{"prn_k"}) || !labelled.HasAny([]string{"analyst"}) {
+		t.Error("API keys must match approvers by id or role only")
+	}
+}
+
+// The user name comes from preferred_username, or a verified email; never an
+// unverified address someone typed into their profile.
+func TestOIDCNameNeedsAVerifiedEmail(t *testing.T) {
+	p := newIDP(t)
+	a := &Authenticator{OIDC: &OIDCVerifier{Issuer: p.issuer(), Audience: "soar-api"}}
+	ctx := context.Background()
+	base := func(extra map[string]any) string {
+		c := map[string]any{
+			"iss": p.issuer(), "aud": "soar-api", "exp": float64(time.Now().Add(time.Hour).Unix()), "sub": "u-9",
+			"realm_access": map[string]any{"roles": []any{"analyst"}},
+		}
+		for k, v := range extra {
+			c[k] = v
+		}
+		return p.token(t, "RS256", "r1", c)
+	}
+	for _, c := range []struct {
+		claims map[string]any
+		want   string
+	}{
+		{map[string]any{"preferred_username": "alice", "email": "x@example.com", "email_verified": true}, "alice"},
+		{map[string]any{"email": "boss@example.com", "email_verified": true}, "boss@example.com"},
+		{map[string]any{"email": "boss@example.com", "email_verified": false}, "u-9"},
+		{map[string]any{"email": "boss@example.com"}, "u-9"},
+	} {
+		pr, err := a.Authenticate(ctx, base(c.claims))
+		if err != nil || pr.Name != c.want || pr.ID != "oidc:u-9" {
+			t.Errorf("%v: name %q id %q err %v, want name %q", c.claims, pr.Name, pr.ID, err, c.want)
+		}
+	}
+	noSub := p.token(t, "RS256", "r1", map[string]any{"iss": p.issuer(), "aud": "soar-api", "exp": float64(time.Now().Add(time.Hour).Unix()), "preferred_username": "x"})
+	if _, err := a.Authenticate(ctx, noSub); err == nil {
+		t.Error("a token without sub has no stable identity and must be refused")
+	}
+}
+
+// env: references reach only variables meant as integration secrets, never the
+// platform's own keys, whatever the process environment holds.
+func TestEnvReferencesAreRestricted(t *testing.T) {
+	t.Setenv("SOAR_MASTER_KEY", "master-key-value")
+	t.Setenv("SOAR_SECRET_IRIS", "iris-key")
+	t.Setenv("SOAR_SOURCE_TOKEN_X", "ingest-token")
+	for _, c := range []struct {
+		name, use string
+		ok        bool
+	}{
+		{"SOAR_SECRET_IRIS", UseConnection, true},
+		{"SOAR_WAZUH_INDEXER_PASSWORD", UseConnection, true},
+		{"SOAR_SOURCE_TOKEN_X", UseConnection, false}, // an ingest token must not be sent anywhere
+		{"SOAR_SOURCE_TOKEN_X", UseIngestAuth, true},
+		{"SOAR_MASTER_KEY", UseConnection, false},
+		{"SOAR_MASTER_KEY", UseIngestAuth, false},
+		{"SOAR_OS_PASSWORD", "", false},
+		{"SOAR_BOOTSTRAP_API_KEY", "", false},
+		{"SOAR_BLOB_SECRET_KEY", "", false},
+		{"SOAR_SECRET_", UseConnection, false}, // the prefix alone names nothing
+		{"PATH", "", false},
+	} {
+		if got := EnvRefAllowed(c.name, c.use); got != c.ok {
+			t.Errorf("EnvRefAllowed(%s, %q) = %v, want %v", c.name, c.use, got, c.ok)
+		}
+	}
+	if v, err := ResolveSecret("env:SOAR_MASTER_KEY"); err == nil || v != "" {
+		t.Errorf("the master key resolved: %q %v", v, err)
+	}
+	ss := &SecretStore{}
+	ctx := context.Background()
+	if _, err := ss.Resolve(ctx, "env:SOAR_MASTER_KEY"); err == nil {
+		t.Error("Resolve must refuse platform variables")
+	}
+	if v, err := ss.ResolveFor(ctx, "env:SOAR_SECRET_IRIS", UseConnection, "dfir_iris"); err != nil || v != "iris-key" {
+		t.Errorf("allowed connection reference: %q %v", v, err)
+	}
+	if _, err := ss.ResolveFor(ctx, "env:SOAR_SOURCE_TOKEN_X", UseConnection, "dfir_iris"); err == nil {
+		t.Error("an ingest token must not resolve for a connection")
+	}
+	if _, err := ss.ResolveFor(ctx, "env:SOAR_SECRET_IRIS", UseWorkflow, "workflows"); err == nil {
+		t.Error("workflow parameters use stored secrets only")
+	}
+}
+
+// A stored secret with a scope serves only the consumers its scope lists.
+func TestSecretScopes(t *testing.T) {
+	ctx := context.Background()
+	st := memory.NewStore("soar")
+	keys, _ := NewKeyring("k1", make([]byte, 32), nil)
+	ss := &SecretStore{Repo: st.Secrets, Keys: keys}
+	if _, err := ss.Put(ctx, "iris_key", "v-iris", "dfir_iris"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ss.Put(ctx, "shared", "v-shared", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ss.Put(ctx, "two", "v-two", "dfir_iris, workflows"); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		ref, use, consumer string
+		ok                 bool
+	}{
+		{"iris_key", UseConnection, "dfir_iris", true},
+		{"iris_key", UseConnection, "outlook", false},
+		{"iris_key", UseWorkflow, "workflows", false},
+		{"shared", UseConnection, "outlook", true},
+		{"shared", UseWorkflow, "workflows", true},
+		{"two", UseWorkflow, "workflows", true},
+		{"two", UseConnection, "wazuh", false},
+	} {
+		_, err := ss.ResolveFor(ctx, c.ref, c.use, c.consumer)
+		if (err == nil) != c.ok {
+			t.Errorf("%s for %s: err=%v, want ok=%v", c.ref, c.consumer, err, c.ok)
+		}
+	}
+	for s, ok := range map[string]bool{"": true, "dfir_iris": true, "dfir_iris,workflows": true, "Bad Scope": false, "x;y": false} {
+		if ValidScope(s) != ok {
+			t.Errorf("ValidScope(%q) != %v", s, ok)
+		}
 	}
 }

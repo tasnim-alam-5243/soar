@@ -3,8 +3,10 @@ package api
 import (
 	"net/http"
 	"regexp"
+	"strings"
 
 	"github.com/yourorg/soar/internal/domain"
+	"github.com/yourorg/soar/internal/security"
 )
 
 var secretNameRe = regexp.MustCompile(`^(env:[A-Za-z_][A-Za-z0-9_]{0,99}|[A-Za-z0-9_.-]{1,100})$`)
@@ -33,8 +35,12 @@ func (s *Server) createConnection(w http.ResponseWriter, r *http.Request) error 
 		v.oneOf("auth_type", in.AuthType, "none", "api_key", "basic", "bearer", "oauth2_client_credentials")
 		for k, val := range in.SecretRefs {
 			ref, ok := val.(string)
-			if !ok || !secretNameRe.MatchString(ref) {
+			switch {
+			case !ok || !secretNameRe.MatchString(ref):
 				v.add("secret_refs."+k, "must be the name of a secret (letters, digits, . _ -), never the secret itself")
+			case strings.HasPrefix(ref, "env:") && !security.EnvRefAllowed(strings.TrimPrefix(ref, "env:"), security.UseConnection):
+				// the process environment also holds the platform's own keys
+				v.add("secret_refs."+k, "%s", security.EnvRefRule(security.UseConnection))
 			}
 		}
 		if err := v.err(); err != nil {

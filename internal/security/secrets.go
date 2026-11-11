@@ -18,13 +18,53 @@ import (
 	"github.com/yourorg/soar/internal/store"
 )
 
+// Secret uses. A connection or source may name an environment variable ("env:NAME")
+// instead of a stored secret, but only one meant for that purpose: the process
+// environment also holds the platform's own keys (SOAR_MASTER_KEY, the OpenSearch and
+// object-store passwords, the bootstrap API key), and a connection's secrets are sent
+// to whatever its configuration points at.
+const (
+	UseConnection = "connection"  // sent to an external system by an action or the collector
+	UseIngestAuth = "ingest_auth" // compared with what a sender presents; never sent
+	UseWorkflow   = "workflow"    // secrets.<name> in workflow parameters (stored secrets only)
+)
+
+var envPrefixes = map[string][]string{
+	UseConnection: {"SOAR_SECRET_", "SOAR_WAZUH_INDEXER_"},
+	UseIngestAuth: {"SOAR_SECRET_", "SOAR_SOURCE_TOKEN_", "SOAR_SOURCE_SECRET_"},
+}
+
+// EnvRefAllowed reports whether the environment variable name may back a secret of
+// the given use. An empty use means any use (the runtime check).
+func EnvRefAllowed(name, use string) bool {
+	for u, prefixes := range envPrefixes {
+		if use != "" && u != use {
+			continue
+		}
+		for _, p := range prefixes {
+			if strings.HasPrefix(name, p) && len(name) > len(p) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// EnvRefRule describes the allowed names for error messages.
+func EnvRefRule(use string) string {
+	return "environment references must name a variable starting with " + strings.Join(envPrefixes[use], " or ")
+}
+
 // ResolveSecret turns an environment reference ("env:NAME") into its value. It is
 // kept for configuration that predates the secret store; SecretStore.Resolve accepts
-// both env: references and secret names.
+// both env: references and secret names. Only variables EnvRefAllowed accepts resolve.
 func ResolveSecret(ref string) (string, error) {
 	name, ok := strings.CutPrefix(ref, "env:")
 	if !ok {
 		return "", fmt.Errorf("secret reference %q: only env:NAME references can be resolved without the secret store", ref)
+	}
+	if !EnvRefAllowed(name, "") {
+		return "", fmt.Errorf("secret reference %q: %s, %s", ref, EnvRefRule(UseConnection), EnvRefRule(UseIngestAuth))
 	}
 	v := os.Getenv(name)
 	if v == "" {
@@ -194,6 +234,7 @@ type SecretStore struct {
 }
 
 type cached struct {
+	scope string
 	value string
 	until time.Time
 }
@@ -255,13 +296,72 @@ func (s *SecretStore) forget(name string) {
 	s.mu.Unlock()
 }
 
-// Resolve returns the plaintext of a secret name or an env: reference. Values are
-// cached briefly in memory to keep decryption off the hot path.
+// Resolve returns the plaintext of a secret name or an allowed env: reference.
+// Values are cached briefly in memory to keep decryption off the hot path. Callers
+// that know what the value is for use ResolveFor, which also enforces scopes.
 func (s *SecretStore) Resolve(ctx context.Context, ref string) (string, error) {
 	if strings.HasPrefix(ref, "env:") {
 		return ResolveSecret(ref)
 	}
+	v, _, err := s.resolve(ctx, strings.TrimPrefix(ref, "secret:"))
+	return v, err
+}
+
+// ResolveFor is Resolve for one use (UseConnection, UseIngestAuth, UseWorkflow) by one
+// consumer (a connector id, or "workflows"): an env: reference must fit the use, and a
+// stored secret with a scope may only be used by a consumer its scope lists.
+func (s *SecretStore) ResolveFor(ctx context.Context, ref, use, consumer string) (string, error) {
+	if name, ok := strings.CutPrefix(ref, "env:"); ok {
+		if use == UseWorkflow || !EnvRefAllowed(name, use) {
+			rule := "workflow parameters can only use stored secrets"
+			if use != UseWorkflow {
+				rule = EnvRefRule(use)
+			}
+			return "", fmt.Errorf("secret reference %q is not allowed here: %s", ref, rule)
+		}
+		return ResolveSecret(ref)
+	}
 	name := strings.TrimPrefix(ref, "secret:")
+	v, scope, err := s.resolve(ctx, name)
+	if err != nil {
+		return "", err
+	}
+	if !ScopeAllows(scope, consumer) {
+		return "", fmt.Errorf("secret %q is scoped to %q and may not be used by %s", name, scope, consumer)
+	}
+	return v, nil
+}
+
+// ScopeAllows reports whether a secret's scope (comma-separated connector ids and/or
+// "workflows"; empty = anywhere) lets consumer use it.
+func ScopeAllows(scope, consumer string) bool {
+	if strings.TrimSpace(scope) == "" {
+		return true
+	}
+	for _, s := range strings.Split(scope, ",") {
+		if strings.TrimSpace(s) == consumer {
+			return true
+		}
+	}
+	return false
+}
+
+// ValidScope reports whether scope is a comma-separated list of consumer names.
+func ValidScope(scope string) bool {
+	if scope == "" {
+		return true
+	}
+	for _, s := range strings.Split(scope, ",") {
+		if !scopeRe.MatchString(strings.TrimSpace(s)) {
+			return false
+		}
+	}
+	return true
+}
+
+var scopeRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_.-]{0,99}$`)
+
+func (s *SecretStore) resolve(ctx context.Context, name string) (value, scope string, err error) {
 	ttl := s.TTL
 	if ttl <= 0 {
 		ttl = 30 * time.Second
@@ -269,30 +369,30 @@ func (s *SecretStore) Resolve(ctx context.Context, ref string) (string, error) {
 	s.mu.Lock()
 	if c, ok := s.cache[name]; ok && s.now().Before(c.until) {
 		s.mu.Unlock()
-		return c.value, nil
+		return c.value, c.scope, nil
 	}
 	s.mu.Unlock()
 	if s.Keys == nil {
-		return "", fmt.Errorf("%w: cannot decrypt secret %q", ErrNoKey, name)
+		return "", "", fmt.Errorf("%w: cannot decrypt secret %q", ErrNoKey, name)
 	}
 	doc, _, err := s.Repo.Get(ctx, SecretID(name))
 	if errors.Is(err, store.ErrNotFound) {
-		return "", fmt.Errorf("secret %q does not exist", name)
+		return "", "", fmt.Errorf("secret %q does not exist", name)
 	}
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	v, err := s.Keys.Decrypt(doc)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	s.mu.Lock()
 	if s.cache == nil {
 		s.cache = map[string]cached{}
 	}
-	s.cache[name] = cached{value: v, until: s.now().Add(ttl)}
+	s.cache[name] = cached{value: v, scope: doc.Scope, until: s.now().Add(ttl)}
 	s.mu.Unlock()
-	return v, nil
+	return v, doc.Scope, nil
 }
 
 // ResolveFunc adapts Resolve to the func(ref) signature used by ingestion.

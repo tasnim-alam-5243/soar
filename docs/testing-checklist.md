@@ -495,7 +495,8 @@ Gate: clean install < 15 min.
 
 ## Known bugs
 
-None open. Fixed on 2026-11-11 (1-2 found while writing this checklist, 3 by the first `make up`, 4-5 by live tests):
+None open. Fixed on 2026-11-11 (1-2 found while writing this checklist, 3 by the first `make up`, 4-5 by live tests,
+6-9 by a security review):
 
 1. Triggers inside `definition` never fired (Step 6). The API now lifts them into the workflow's `triggers`, and
    the processor and scheduler also read any left in older stored definitions. Checked in Step 6.
@@ -510,6 +511,14 @@ None open. Fixed on 2026-11-11 (1-2 found while writing this checklist, 3 by the
 5. A processor killed between its main write and its acknowledgements counted the redelivered events twice in
    `occurrence_count` (Step 8; 160 extra in 60,000). The duplicate guard now records the applied increment in the
    same bulk request. Checked in Step 8.
+6. A connection could name any environment variable as a secret (`env:SOAR_MASTER_KEY`), so an engineer could have
+   the worker send the master key to a server of their choice. Only `SOAR_SECRET_*` (and the documented ingest/indexer
+   prefixes) resolve now; secret scopes are enforced. Checked in Step 9 (`make test-security`).
+7. Worker -> runner gRPC was always plain text. It is TLS/mTLS now; plain text needs the runner on the same host or
+   `SOAR_RUNNER_INSECURE=true` (set by the dev stack).
+8. Restarting the api re-enabled a disabled bootstrap API key. It is created once and left as admins leave it.
+9. Approvers were matched by any principal's name (an API key could be labelled like a user) and an unverified OIDC
+   email counted as a name. API keys match by id only; emails must be verified.
 
 ## Not built yet (from the spec; do not expect these to work)
 

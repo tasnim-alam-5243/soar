@@ -279,3 +279,70 @@ func TestSecurityBodySizeAndDepthLimits(t *testing.T) {
 		t.Errorf("body over 1 MiB: %d", code)
 	}
 }
+
+// A connection or source can name only environment variables meant as integration
+// secrets: an engineer must not be able to point a connection at the master key and
+// have the worker send it to a server of their choice.
+func TestSecurityEnvReferencesCannotReachPlatformKeys(t *testing.T) {
+	s := newSecSuite(t)
+	conn := func(ref string) int {
+		code, _ := s.do("POST", "/connections", s.keys["engineer"], []byte(`{"connector_id":"dfir_iris","name":"x`+ref+`","auth_type":"bearer",
+			"secret_refs":{"api_key":"`+ref+`"},"config":{"base_url":"https://attacker.invalid"}}`))
+		return code
+	}
+	for _, ref := range []string{
+		"env:SOAR_MASTER_KEY", "env:SOAR_OLD_MASTER_KEYS", "env:SOAR_OS_PASSWORD", "env:SOAR_BLOB_SECRET_KEY",
+		"env:SOAR_BOOTSTRAP_API_KEY", "env:SOAR_SOURCE_TOKEN_WAZUH_PROD", "env:PATH",
+	} {
+		if c := conn(ref); c != http.StatusUnprocessableEntity {
+			t.Errorf("connection with %s: %d, want 422", ref, c)
+		}
+	}
+	for _, ref := range []string{"env:SOAR_SECRET_IRIS_KEY", "env:SOAR_WAZUH_INDEXER_PASSWORD", "iris_key"} {
+		if c := conn(ref); c != http.StatusCreated {
+			t.Errorf("connection with %s: %d, want 201", ref, c)
+		}
+	}
+	src := func(ref string) (int, string) {
+		return s.do("POST", "/sources", s.keys["engineer"], []byte(`{"name":"s-`+strings.ToLower(strings.NewReplacer(":", "-", "_", "-").Replace(ref))+`","system":"x",
+			"adapter":"webhook","parser":"json","mapping":"m@1","auth":{"type":"token","token_ref":"`+ref+`"}}`))
+	}
+	if c, out := src("env:SOAR_MASTER_KEY"); c != http.StatusUnprocessableEntity || !strings.Contains(out, "auth.token_ref") {
+		t.Errorf("source token_ref env:SOAR_MASTER_KEY: %d %s, want 422 naming auth.token_ref", c, out)
+	}
+	if _, out := src("env:SOAR_SOURCE_TOKEN_ACME"); strings.Contains(out, "auth.token_ref") {
+		t.Errorf("an ingest token variable must be accepted: %s", out)
+	}
+	if c, _ := s.do("PUT", "/secrets/x", s.keys["engineer"], []byte(`{"value":"v","scope":"Not A Scope"}`)); c != http.StatusUnprocessableEntity {
+		t.Errorf("invalid scope: %d, want 422", c)
+	}
+}
+
+// Restarting the api must not undo an admin's revocation of the bootstrap key.
+func TestSecurityBootstrapKeyStaysRevoked(t *testing.T) {
+	ctx := context.Background()
+	st := memory.NewStore("soar")
+	const key = "soar_bootstrap-test-key-0123456789abcdefghij"
+	if disabled, err := EnsureBootstrapKey(ctx, st, key); err != nil || disabled {
+		t.Fatalf("first start: %v %v", disabled, err)
+	}
+	if _, _, err := st.Principals.Update(ctx, BootstrapPrincipalID, func(p *domain.Principal) error {
+		p.Disabled, p.Roles = true, []string{security.RoleViewer}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	disabled, err := EnsureBootstrapKey(ctx, st, key) // the api restarts with the variable still set
+	p, _, _ := st.Principals.Get(ctx, BootstrapPrincipalID)
+	if err != nil || !disabled || !p.Disabled || len(p.Roles) != 1 || p.Roles[0] != security.RoleViewer {
+		t.Errorf("restart undid the admin's changes: disabled=%v err=%v principal=%+v", disabled, err, p)
+	}
+	const rotated = "soar_bootstrap-rotated-0123456789abcdefghijk"
+	if _, err := EnsureBootstrapKey(ctx, st, rotated); err != nil {
+		t.Fatal(err)
+	}
+	p, _, _ = st.Principals.Get(ctx, BootstrapPrincipalID)
+	if p.KeyHash != security.HashAPIKey(rotated) || !p.Disabled {
+		t.Errorf("a rotated key must replace the hash and keep the principal disabled: %+v", p)
+	}
+}

@@ -138,6 +138,11 @@ services:
     environment:
       <<: *env
       SOAR_RUNNER_ADDR: runner:50051
+      # mTLS to the runner (decrypted connection secrets cross this channel); see docs/runbooks.md "TLS and mTLS"
+      SOAR_RUNNER_CA_FILE: ${SOAR_RUNNER_CA_FILE:-}
+      SOAR_RUNNER_CERT_FILE: ${SOAR_RUNNER_CERT_FILE:-}
+      SOAR_RUNNER_KEY_FILE: ${SOAR_RUNNER_KEY_FILE:-}
+      SOAR_RUNNER_INSECURE: "${SOAR_RUNNER_INSECURE:-false}"
       SOAR_WORKER_CONCURRENCY: "${SOAR_WORKER_CONCURRENCY:-32}"
     networks: [default, runner]
     deploy: { replicas: 2, resources: { limits: { cpus: "2", memory: 1g } } }
@@ -158,8 +163,12 @@ services:
     security_opt: ["no-new-privileges:true"]
     environment:
       SOAR_RUNNER_WORKERS: "32"
+      SOAR_RUNNER_TLS_CERT_FILE: ${SOAR_RUNNER_TLS_CERT_FILE:-}
+      SOAR_RUNNER_TLS_KEY_FILE: ${SOAR_RUNNER_TLS_KEY_FILE:-}
+      SOAR_RUNNER_TLS_CLIENT_CA_FILE: ${SOAR_RUNNER_TLS_CLIENT_CA_FILE:-}
       HTTPS_PROXY: ${RUNNER_HTTPS_PROXY:?route integration egress through an allowlisting proxy (spec 10)}
       NO_PROXY: ""
+    volumes: ["./certs:/etc/soar/certs:ro,z"]
     networks: [runner, egress]
     deploy: { replicas: 2, resources: { limits: { cpus: "4", memory: 2g } } }
 

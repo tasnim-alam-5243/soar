@@ -68,5 +68,5 @@ func Runner(cfg config.Config) (*runner.Client, error) {
 	if cfg.RunnerAddr == "" {
 		return nil, nil
 	}
-	return runner.Dial(cfg.RunnerAddr)
+	return runner.Dial(cfg.RunnerAddr, cfg.RunnerTLS)
 }

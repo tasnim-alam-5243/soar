@@ -60,8 +60,12 @@ development Compose file; for production use `-f deploy/prod/docker-compose.yml 
 2. `SOAR_TLS_CLIENT_CA_FILE` makes every role require a client certificate signed by that CA, except on `/healthz`
    and `/readyz` (container healthchecks). Prometheus then needs a client certificate to scrape `/metrics`, and the
    web container's nginx must proxy to `https://api:8080` with one.
-3. Restart the roles. A missing, unreadable or mismatched file stops a role at start (exit 2, the log names the
-   variable); the start log shows `os_tls`, `nats_tls` and `http_tls`.
+3. Worker to runner (decrypted connection secrets cross it): give the runner `SOAR_RUNNER_TLS_CERT_FILE` /
+   `SOAR_RUNNER_TLS_KEY_FILE` (certificate name `runner`) and `SOAR_RUNNER_TLS_CLIENT_CA_FILE`, and the worker
+   `SOAR_RUNNER_CA_FILE` plus its client certificate `SOAR_RUNNER_CERT_FILE` / `SOAR_RUNNER_KEY_FILE`. Without them
+   the worker refuses to start against a remote runner unless `SOAR_RUNNER_INSECURE=true`.
+4. Restart the roles. A missing, unreadable or mismatched file stops a role at start (exit 2, the log names the
+   variable); the start log shows `os_tls`, `nats_tls`, `http_tls` and `runner_tls`.
 
 ## Dead letters (alert `DeadLetters`)
 

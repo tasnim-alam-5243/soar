@@ -4,6 +4,7 @@ package runner
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 
@@ -25,11 +27,15 @@ type Client struct {
 	rpc  runnerpb.RunnerClient
 }
 
-// Dial connects lazily; the first call establishes the connection. The runner sits on
-// an internal network without external access, so the channel is plaintext; put a
-// service mesh or mTLS proxy in front of it if the network is not trusted.
-func Dial(addr string) (*Client, error) {
-	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()),
+// Dial connects to the runner: over TLS when tc is set (mTLS when tc holds a client
+// certificate), otherwise in plain text (the configuration allows that only on a
+// private network or to this host).
+func Dial(addr string, tc *tls.Config) (*Client, error) {
+	creds := insecure.NewCredentials()
+	if tc != nil {
+		creds = credentials.NewTLS(tc.Clone())
+	}
+	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(creds),
 		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(8<<20), grpc.MaxCallSendMsgSize(8<<20)))
 	if err != nil {
 		return nil, fmt.Errorf("runner: %w", err)

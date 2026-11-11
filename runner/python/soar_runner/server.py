@@ -230,12 +230,27 @@ class RunnerService(pbg.RunnerServicer):
         return pb.HealthResponse(ready=True, actions=sorted(self.catalog.actions), version=__version__)
 
 
-def serve(listen: str, integrations: str, scripts: str, workers: int) -> Tuple[grpc.Server, int]:
+def tls_credentials(cert_file: str, key_file: str, client_ca_file: str = "") -> grpc.ServerCredentials:
+    """Server TLS; with client_ca_file every caller must present a certificate signed by that CA (mTLS)."""
+    def read(path: str) -> bytes:
+        with open(path, "rb") as fh:
+            return fh.read()
+    ca = read(client_ca_file) if client_ca_file else None
+    return grpc.ssl_server_credentials([(read(key_file), read(cert_file))], root_certificates=ca, require_client_auth=ca is not None)
+
+
+def serve(listen: str, integrations: str, scripts: str, workers: int,
+          credentials: Optional[grpc.ServerCredentials] = None) -> Tuple[grpc.Server, int]:
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=workers), options=[
         ("grpc.max_receive_message_length", 8 * 1024 * 1024), ("grpc.max_send_message_length", 8 * 1024 * 1024)])
     catalog = Catalog(integrations)
     pbg.add_RunnerServicer_to_server(RunnerService(catalog, scripts), server)
-    port = server.add_insecure_port(listen)
+    if credentials is not None:
+        port = server.add_secure_port(listen, credentials)
+    else:
+        # the worker sends decrypted connection secrets over this channel: plaintext only on a private network
+        log.warning("runner serves plaintext gRPC; set SOAR_RUNNER_TLS_CERT_FILE and SOAR_RUNNER_TLS_KEY_FILE outside a private network")
+        port = server.add_insecure_port(listen)
     if port == 0:
         raise SystemExit(f"cannot listen on {listen}")
     server.start()
@@ -250,9 +265,16 @@ def main(argv: Optional[List[str]] = None) -> None:
     ap.add_argument("--integrations", default=os.environ.get("SOAR_RUNNER_INTEGRATIONS", "/app/integrations"))
     ap.add_argument("--scripts", default=os.environ.get("SOAR_RUNNER_SCRIPTS", "/app/scripts"))
     ap.add_argument("--workers", type=int, default=int(os.environ.get("SOAR_RUNNER_WORKERS", "16")))
+    ap.add_argument("--tls-cert", default=os.environ.get("SOAR_RUNNER_TLS_CERT_FILE", ""))
+    ap.add_argument("--tls-key", default=os.environ.get("SOAR_RUNNER_TLS_KEY_FILE", ""))
+    ap.add_argument("--tls-client-ca", default=os.environ.get("SOAR_RUNNER_TLS_CLIENT_CA_FILE", ""),
+                    help="require client certificates signed by this CA (mTLS)")
     args = ap.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format='{"time":"%(asctime)s","level":"%(levelname)s","msg":"%(message)s","role":"runner"}')
-    server, _ = serve(args.listen, args.integrations, args.scripts, args.workers)
+    if bool(args.tls_cert) != bool(args.tls_key) or (args.tls_client_ca and not args.tls_cert):
+        raise SystemExit("set both SOAR_RUNNER_TLS_CERT_FILE and SOAR_RUNNER_TLS_KEY_FILE (SOAR_RUNNER_TLS_CLIENT_CA_FILE needs them)")
+    creds = tls_credentials(args.tls_cert, args.tls_key, args.tls_client_ca) if args.tls_cert else None
+    server, _ = serve(args.listen, args.integrations, args.scripts, args.workers, creds)
     stop = threading.Event()
     signal.signal(signal.SIGTERM, lambda *_: stop.set())
     signal.signal(signal.SIGINT, lambda *_: stop.set())

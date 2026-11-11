@@ -56,7 +56,7 @@ Common fields: `id` (letters, digits, `_`), `type`, `when` (CEL; false skips the
 | `parallel` | `branches` | Starts all listed nodes |
 | `foreach` | `items` (CEL list, up to 1,000), `action`, `params` (with `item`, `index`), `concurrency` (default 4, max 50) | Output: one `{item, status, output, error}` per element; fails when any element failed unless `continue_on_error` |
 | `wait` | `duration` (30s, 5m, 2h, 1d) or `until` (CEL, RFC 3339 time) | Durable timer |
-| `approval` | `message`, `approvers` (roles or user names; default analyst, engineer, admin), `timeout` (default 24h), `on_timeout` (reject, approve), `on_reject` | Output `{approved, decided_by, comment}`; a rejection without `on_reject` fails the node |
+| `approval` | `message`, `approvers` (roles, OIDC user names as `alice` or `user:alice`, or principal ids `oidc:<sub>` / `prn_...`; API keys match by id only; default analyst, engineer, admin), `timeout` (default 24h), `on_timeout` (reject, approve), `on_reject` | Output `{approved, decided_by, comment}`; a rejection without `on_reject` fails the node |
 | `set` | `vars: {name: expression}` | Assignments run in name order |
 | `subworkflow` | `workflow` (name of a published workflow), `inputs` | Output: the child's `outputs` |
 | `end` | `status` (succeeded, failed), `output` | Ends the execution; unfinished nodes are cancelled |
