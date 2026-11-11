@@ -4,3 +4,8 @@ bin
 web/node_modules
 **/*.log
 .env
+web/dist
+runner/python/.venv
+**/__pycache__
+**/.pytest_cache
+*.tar.gz

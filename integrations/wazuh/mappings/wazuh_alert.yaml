@@ -1,0 +1,33 @@
+# Wazuh 4.14 alert -> normalized alert (spec 10.1). Works for manager alerts (alerts.json,
+# integrator) and for indexer _source documents: both carry the same fields.
+# Always use get_path/coalesce for optional fields: rule.mitre and data are often absent.
+id: wazuh_alert
+version: 1
+kind: alert
+fields:
+  external_id: 'raw.id'                                  # e.g. "1793256511.10907"; same value from push and pull
+  title: 'raw.rule.description'
+  description: 'coalesce(get_path(raw, "full_log"), "")'
+  severity: 'level_map(raw.rule.level, [[0,3,1],[4,6,2],[7,9,3],[10,12,4],[13,16,5]])'
+  original_severity: 'string(raw.rule.level)'
+  occurred_at: 'parse_time(raw.timestamp)'               # offset has no colon: +0600
+  tags: 'coalesce(get_path(raw, "rule.groups"), [])'
+observables:                                             # null or empty values are skipped
+  - { type: host,      value: 'get_path(raw, "agent.name")' }
+  - { type: ip,        value: 'get_path(raw, "data.srcip")',   role: source }
+  - { type: user,      value: 'get_path(raw, "data.srcuser")', role: source }
+  - { type: user,      value: 'get_path(raw, "data.dstuser")', role: target }
+  - { type: file_path, value: 'get_path(raw, "syscheck.path")' }
+  - { type: hash,      value: 'get_path(raw, "syscheck.sha256_after")', skip_if: 'is_empty_hash(value)' }
+  - { type: hash,      value: 'get_path(raw, "syscheck.sha1_after")',   skip_if: 'is_empty_hash(value)' }
+  - { type: hash,      value: 'get_path(raw, "syscheck.md5_after")',    skip_if: 'is_empty_hash(value)' }
+mitre:                                                   # separate lists; tactics are not paired with techniques
+  technique_ids: 'coalesce(get_path(raw, "rule.mitre.id"), [])'
+  techniques: 'coalesce(get_path(raw, "rule.mitre.technique"), [])'
+  tactics: 'coalesce(get_path(raw, "rule.mitre.tactic"), [])'
+dedup_key:                                               # rule + agent + source address or path + target user
+  - 'coalesce(get_path(raw, "rule.id"), "")'
+  - 'coalesce(get_path(raw, "agent.id"), "")'
+  - 'coalesce(get_path(raw, "data.srcip"), get_path(raw, "syscheck.path"), "")'
+  - 'coalesce(get_path(raw, "data.dstuser"), "")'
+ext: 'raw'                                               # vendor fields stay searchable under ext.*

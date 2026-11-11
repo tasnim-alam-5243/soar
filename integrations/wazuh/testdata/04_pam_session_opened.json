@@ -1,0 +1,47 @@
+{
+  "timestamp": "2026-10-29T12:51:40.333+0600",
+  "rule": {
+    "level": 3,
+    "description": "PAM: Login session opened.",
+    "id": "5501",
+    "firedtimes": 9,
+    "mail": false,
+    "groups": [
+      "pam",
+      "syslog",
+      "authentication_success"
+    ],
+    "mitre": {
+      "id": [
+        "T1078"
+      ],
+      "tactic": [
+        "Defense Evasion",
+        "Persistence",
+        "Privilege Escalation",
+        "Initial Access"
+      ],
+      "technique": [
+        "Valid Accounts"
+      ]
+    }
+  },
+  "agent": {
+    "id": "001",
+    "name": "web01"
+  },
+  "manager": {
+    "name": "wazuh-manager"
+  },
+  "id": "1793256700.12000",
+  "decoder": {
+    "name": "pam",
+    "parent": "pam"
+  },
+  "location": "/var/log/secure",
+  "full_log": "Oct 29 12:51:40 web01 sshd[2211]: pam_unix(sshd:session): session opened for user root(uid=0) by (uid=0)",
+  "data": {
+    "dstuser": "root",
+    "uid": "0"
+  }
+}

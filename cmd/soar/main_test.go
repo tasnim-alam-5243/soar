@@ -37,7 +37,7 @@ func TestServeRefusesBadConfig(t *testing.T) {
 }
 
 func TestEveryRoleHasACommand(t *testing.T) {
-	for _, r := range []string{"api", "ingest", "collector", "processor", "orchestrator", "worker", "scheduler", "migrate", "migrate-check"} {
+	for _, r := range []string{"api", "ingest", "collector", "processor", "orchestrator", "worker", "scheduler", "migrate", "migrate-check", "seed"} {
 		if _, ok := commands[r]; !ok {
 			t.Errorf("missing command %s", r)
 		}

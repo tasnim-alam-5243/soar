@@ -1,0 +1,170 @@
+# Microsoft 365 mail through Microsoft Graph (spec 10.1, "Outlook mail").
+# Model: ingest from one shared mailbox (source outlook-phish), act on many mailboxes.
+# App registration: application permissions Mail.Read, Mail.ReadWrite, Mail.Send. Prefer a
+# certificate credential over a client secret. Every action takes a mailbox, checked against the
+# connection's mailbox_scope (allow / deny lists; today allow: all, deny: empty).
+# Purge (permanent deletion) is *verify*: confirm Graph's permanentDelete support in your tenant.
+name: outlook
+title: Microsoft 365 mail (Graph)
+description: Search, move, delete and send mail in Microsoft 365 mailboxes; the outlook-phish source ingests reported emails.
+version: "1"
+auth:
+  type: oauth2_client_credentials
+connection_schema:
+  type: object
+  required: [tenant_id, client_id]
+  properties:
+    tenant_id: { type: string }
+    client_id: { type: string }
+    default_mailbox: { type: string, description: shared mailbox used to send by default }
+    mailbox_scope:
+      type: object
+      properties:
+        allow: { description: '"all" or a list of mailboxes / domains (@corp.example)' }
+        deny: { type: array, items: { type: string } }
+    max_mailboxes_per_run: { type: integer, minimum: 1, maximum: 5000 }
+    graph_url: { type: string }
+    authority_url: { type: string }
+secrets: [client_secret, certificate_pem, private_key_pem]
+defaults:
+  class: python
+  retryable_errors: [network, timeout, http_5xx, http_429]
+  limits: { cpu: 0.5, memory_mb: 192, timeout_s: 120, egress: ["graph.microsoft.com", "login.microsoftonline.com"] }
+actions:
+  - id: outlook.connection.test
+    title: Test connection
+    description: Obtain a Graph token and read the default mailbox's inbox folder.
+    side_effect: read
+    risk: low
+    supports_dry_run: true
+    entrypoint: "actions/outlook.py:connection_test"
+    params_schema: { type: object, additionalProperties: false, properties: {} }
+  - id: outlook.mail.get
+    title: Get message
+    description: Return one message (headers, body, attachment metadata) from a mailbox.
+    side_effect: read
+    risk: low
+    supports_dry_run: true
+    entrypoint: "actions/outlook.py:mail_get"
+    params_schema:
+      type: object
+      additionalProperties: false
+      required: [mailbox, message_id]
+      properties: { mailbox: { type: string }, message_id: { type: string }, include_headers: { type: boolean } }
+  - id: outlook.mail.search
+    title: Search mailboxes
+    description: Find messages in one or many mailboxes by sender, subject, internet message id or a KQL query (campaign response).
+    side_effect: read
+    risk: low
+    supports_dry_run: true
+    entrypoint: "actions/outlook.py:mail_search"
+    params_schema:
+      type: object
+      additionalProperties: false
+      properties:
+        mailbox: { type: string }
+        mailboxes: { type: array, items: { type: string } }
+        from: { type: string }
+        subject: { type: string }
+        internet_message_id: { type: string }
+        query: { type: string, description: KQL ($search), e.g. "from:evil@x.example" }
+        received_after: { type: string, format: date-time }
+        top: { type: integer, minimum: 1, maximum: 250 }
+    output_schema:
+      type: object
+      properties: { messages: { type: array }, mailboxes_searched: { type: integer }, errors: { type: array } }
+  - id: outlook.mail.get_attachment
+    title: Get attachment
+    description: Download an attachment's content (base64) and its SHA-256, for analysis or evidence.
+    side_effect: read
+    risk: low
+    supports_dry_run: true
+    entrypoint: "actions/outlook.py:get_attachment"
+    params_schema:
+      type: object
+      additionalProperties: false
+      required: [mailbox, message_id, attachment_id]
+      properties: { mailbox: { type: string }, message_id: { type: string }, attachment_id: { type: string } }
+  - id: outlook.mail.mark_read
+    title: Mark read
+    description: Mark a message read or unread.
+    side_effect: write
+    risk: low
+    supports_dry_run: true
+    entrypoint: "actions/outlook.py:mark_read"
+    params_schema:
+      type: object
+      additionalProperties: false
+      required: [mailbox, message_id]
+      properties: { mailbox: { type: string }, message_id: { type: string }, read: { type: boolean } }
+  - id: outlook.mail.move
+    title: Move message
+    description: Move a message to another folder (well-known name such as junkemail, or a folder id).
+    side_effect: write
+    risk: medium
+    supports_dry_run: true
+    entrypoint: "actions/outlook.py:move"
+    params_schema:
+      type: object
+      additionalProperties: false
+      required: [mailbox, message_id, folder]
+      properties: { mailbox: { type: string }, message_id: { type: string }, folder: { type: string } }
+  - id: outlook.mail.reply
+    title: Reply
+    description: Reply to a message (for example to thank the reporter).
+    side_effect: write
+    risk: low
+    supports_dry_run: true
+    at_most_once: true
+    entrypoint: "actions/outlook.py:reply"
+    params_schema:
+      type: object
+      additionalProperties: false
+      required: [mailbox, message_id, comment]
+      properties: { mailbox: { type: string }, message_id: { type: string }, comment: { type: string, maxLength: 20000 } }
+  - id: outlook.mail.send
+    title: Send mail
+    description: Send a message from a mailbox (the shared mailbox by default) to to/cc/bcc lists, split into batches. Over 50 recipients needs approval.
+    side_effect: write
+    risk: medium
+    supports_dry_run: true
+    at_most_once: true
+    approval_policy: { recipients_over: 50 }
+    entrypoint: "actions/outlook.py:send"
+    params_schema:
+      type: object
+      additionalProperties: false
+      required: [subject, body]
+      properties:
+        mailbox: { type: string }
+        to: { type: array, items: { type: string } }
+        cc: { type: array, items: { type: string } }
+        bcc: { type: array, items: { type: string } }
+        subject: { type: string, maxLength: 1000 }
+        body: { type: string }
+        html: { type: boolean }
+        batch_size: { type: integer, minimum: 1, maximum: 500 }
+  - id: outlook.mail.delete
+    title: Delete message
+    description: Move a message to Deleted Items. Destructive; needs approval by default.
+    side_effect: destructive
+    risk: high
+    supports_dry_run: true
+    entrypoint: "actions/outlook.py:delete"
+    params_schema:
+      type: object
+      additionalProperties: false
+      required: [mailbox, message_id]
+      properties: { mailbox: { type: string }, message_id: { type: string } }
+  - id: outlook.mail.purge
+    title: Purge message
+    description: Permanently delete a message (*verify* Graph permanentDelete). Destructive; needs approval by default.
+    side_effect: destructive
+    risk: high
+    supports_dry_run: true
+    entrypoint: "actions/outlook.py:purge"
+    params_schema:
+      type: object
+      additionalProperties: false
+      required: [mailbox, message_id]
+      properties: { mailbox: { type: string }, message_id: { type: string } }

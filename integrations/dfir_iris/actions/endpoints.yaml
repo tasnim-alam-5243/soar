@@ -1,0 +1,23 @@
+# DFIR-IRIS endpoint table per API generation (spec 10.1). Action code never hard-codes paths.
+# legacy_2_4: the "v2.0.4" API reference, valid for IRIS 2.4.x. Case-scoped calls add ?cid=<case>.
+# *verify* each path on 2.4.27; IRIS v3 removes these legacy endpoints (see the IRIS legacy-to-/api/v2 mapping).
+legacy_2_4:
+  ping:              { method: GET,  path: /api/ping }
+  case_create:       { method: POST, path: /manage/cases/add }
+  case_update:       { method: POST, path: "/manage/cases/update/{case_id}" }
+  case_close:        { method: POST, path: "/manage/cases/close/{case_id}" }
+  alert_create:      { method: POST, path: /alerts/add }
+  alert_update:      { method: POST, path: "/alerts/update/{alert_id}" }
+  alert_merge:       { method: POST, path: "/alerts/merge/{alert_id}" }
+  ioc_add:           { method: POST, path: /case/ioc/add, case_scoped: true }
+  ioc_list:          { method: GET,  path: /case/ioc/list, case_scoped: true }
+  asset_add:         { method: POST, path: /case/assets/add, case_scoped: true }
+  note_group_list:   { method: GET,  path: /case/notes/groups/list, case_scoped: true }
+  note_group_add:    { method: POST, path: /case/notes/groups/add, case_scoped: true }
+  note_add:          { method: POST, path: /case/notes/add, case_scoped: true }
+  timeline_add:      { method: POST, path: /case/timeline/events/add, case_scoped: true }
+  task_add:          { method: POST, path: /case/tasks/add, case_scoped: true }
+  ioc_types:         { method: GET,  path: /manage/ioc-types/list }
+  tlp_list:          { method: GET,  path: /manage/tlp/list }
+  asset_types:       { method: GET,  path: /manage/asset-type/list }
+  users:             { method: GET,  path: /manage/users/restricted/list }

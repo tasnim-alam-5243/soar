@@ -25,6 +25,7 @@ type Trigger struct {
 	Type  string `json:"type"`            // alert | schedule | manual | event
 	Kind  string `json:"kind,omitempty"`  // event kind: alert, case_event, ...
 	Match string `json:"match,omitempty"` // CEL condition
+	Cron  string `json:"cron,omitempty"`  // schedule triggers: 5-field cron or @every
 }
 
 type Workflow struct {
@@ -39,9 +40,13 @@ type Workflow struct {
 	CreatedBy   string    `json:"created_by,omitempty"`
 }
 
+// OutboxEntry is one pending side effect of an execution (spec 8.4). It is saved in
+// the same write as the state change that caused it and carried out afterwards.
 type OutboxEntry struct {
 	Key         string     `json:"key"`
-	Subject     string     `json:"subject"`
+	Kind        string     `json:"kind,omitempty"` // dispatch | timer | approval | start_child | notify_parent
+	Subject     string     `json:"subject,omitempty"`
+	Payload     JSON       `json:"payload,omitempty"` // the engine command
 	PayloadRef  string     `json:"payload_ref,omitempty"`
 	Published   bool       `json:"published"`
 	CreatedAt   time.Time  `json:"created_at"`
@@ -54,28 +59,56 @@ type Lease struct {
 }
 
 type ExecutionTrigger struct {
-	Type    string `json:"type"`
-	Kind    string `json:"kind,omitempty"`
-	AlertID string `json:"alert_id,omitempty"`
-	EventID string `json:"event_id,omitempty"`
-	User    string `json:"user,omitempty"`
+	Type              string     `json:"type"` // alert | manual | schedule | subworkflow | retry | event
+	Kind              string     `json:"kind,omitempty"`
+	AlertID           string     `json:"alert_id,omitempty"`
+	EventID           string     `json:"event_id,omitempty"`
+	User              string     `json:"user,omitempty"`
+	ParentExecutionID string     `json:"parent_execution_id,omitempty"`
+	ParentNodeID      string     `json:"parent_node_id,omitempty"`
+	RetryOf           string     `json:"retry_of,omitempty"`
+	ScheduledFor      *time.Time `json:"scheduled_for,omitempty"`
 }
 
 type Execution struct {
 	Meta
-	WorkflowID      string           `json:"workflow_id"`
-	WorkflowVersion int              `json:"workflow_version"`
-	Status          string           `json:"status"` // queued|running|waiting|succeeded|failed|cancelled|timed_out
-	Trigger         ExecutionTrigger `json:"trigger"`
-	Context         JSON             `json:"context,omitempty"`
-	PendingNodes    []string         `json:"pending_nodes,omitempty"`
-	Outbox          []OutboxEntry    `json:"outbox,omitempty"`
-	Lease           *Lease           `json:"lease,omitempty"`
-	Partition       int              `json:"partition"`
-	Error           string           `json:"error,omitempty"`
-	StartedAt       *time.Time       `json:"started_at,omitempty"`
-	EndedAt         *time.Time       `json:"ended_at,omitempty"`
-	DeadlineAt      *time.Time       `json:"deadline_at,omitempty"`
+	WorkflowID       string           `json:"workflow_id"`
+	WorkflowName     string           `json:"workflow_name,omitempty"`
+	WorkflowVersion  int              `json:"workflow_version"`
+	WorkflowChecksum string           `json:"workflow_checksum,omitempty"`
+	Status           string           `json:"status"` // queued|running|waiting|succeeded|failed|cancelled|timed_out
+	Trigger          ExecutionTrigger `json:"trigger"`
+	Context          JSON             `json:"context,omitempty"` // engine state (inputs, vars, node states)
+	PendingNodes     []string         `json:"pending_nodes,omitempty"`
+	Outbox           []OutboxEntry    `json:"outbox,omitempty"`
+	OutboxPending    bool             `json:"outbox_pending"` // any unpublished outbox entry (sweeper index)
+	Lease            *Lease           `json:"lease,omitempty"`
+	Partition        int              `json:"partition"`
+	DryRun           bool             `json:"dry_run,omitempty"`
+	Error            string           `json:"error,omitempty"`
+	StartedAt        *time.Time       `json:"started_at,omitempty"`
+	EndedAt          *time.Time       `json:"ended_at,omitempty"`
+	DeadlineAt       *time.Time       `json:"deadline_at,omitempty"`
+}
+
+// Approval is a human decision requested by an approval node or by policy (spec 10, 20.1).
+type Approval struct {
+	Meta
+	ExecutionID  string     `json:"execution_id"`
+	NodeID       string     `json:"node_id"`
+	WorkflowID   string     `json:"workflow_id,omitempty"`
+	WorkflowName string     `json:"workflow_name,omitempty"`
+	Partition    int        `json:"partition"`
+	Approvers    []string   `json:"approvers"` // roles or user names allowed to decide
+	Message      string     `json:"message,omitempty"`
+	Action       string     `json:"action,omitempty"`  // action awaiting approval (policy approvals)
+	Command      JSON       `json:"command,omitempty"` // the held-back dispatch (policy approvals)
+	Risk         string     `json:"risk,omitempty"`
+	Status       string     `json:"status"` // pending | approved | rejected | expired | cancelled
+	DecidedBy    string     `json:"decided_by,omitempty"`
+	DecidedAt    *time.Time `json:"decided_at,omitempty"`
+	Comment      string     `json:"comment,omitempty"`
+	DueAt        time.Time  `json:"due_at"`
 }
 
 type StepError struct {
@@ -87,12 +120,17 @@ type StepError struct {
 type StepRun struct {
 	Meta
 	ExecutionID    string     `json:"execution_id"`
+	WorkflowID     string     `json:"workflow_id,omitempty"`
 	NodeID         string     `json:"node_id"`
 	Action         string     `json:"action,omitempty"`
 	Attempt        int        `json:"attempt"`
+	Item           int        `json:"item,omitempty"`
 	Status         string     `json:"status"`
+	Input          JSON       `json:"input,omitempty"`  // {"value": params}, secrets redacted (64 KB or less)
+	Output         JSON       `json:"output,omitempty"` // {"value": output} (64 KB or less)
 	InputRef       string     `json:"input_ref,omitempty"`
 	OutputRef      string     `json:"output_ref,omitempty"`
+	DryRun         bool       `json:"dry_run,omitempty"`
 	Error          *StepError `json:"error,omitempty"`
 	DurationMS     int64      `json:"duration_ms,omitempty"`
 	IdempotencyKey string     `json:"idempotency_key,omitempty"`
@@ -178,6 +216,7 @@ type Case struct {
 	Tags         []string      `json:"tags,omitempty"`
 	Verdict      string        `json:"verdict,omitempty"`
 	ExternalRefs []ExternalRef `json:"external_refs,omitempty"`
+	Evidence     []Evidence    `json:"evidence,omitempty"` // files in soar-evidence, deleted with the case
 	ClosedAt     *time.Time    `json:"closed_at,omitempty"`
 }
 
@@ -241,9 +280,10 @@ type AuditRecord struct {
 type Secret struct {
 	Meta
 	Name       string `json:"name"`
-	Ciphertext string `json:"ciphertext"` // base64
+	Ciphertext string `json:"ciphertext,omitempty"` // base64
 	KeyID      string `json:"key_id"`
-	Nonce      string `json:"nonce"` // base64
+	WrappedKey string `json:"wrapped_key,omitempty"` // data key encrypted with the master key (base64)
+	Nonce      string `json:"nonce,omitempty"`       // base64
 	Scope      string `json:"scope,omitempty"`
 }
 
@@ -261,6 +301,7 @@ type Idempotency struct {
 	Key       string    `json:"key"`
 	Status    string    `json:"status"` // in_progress | done | failed
 	ResultRef string    `json:"result_ref,omitempty"`
+	Result    JSON      `json:"result,omitempty"` // the step result to republish on a duplicate delivery
 	ExpiresAt time.Time `json:"expires_at"`
 }
 
@@ -269,7 +310,10 @@ type Timer struct {
 	ExecutionID string     `json:"execution_id"`
 	NodeID      string     `json:"node_id"`
 	DueAt       time.Time  `json:"due_at"`
-	Kind        string     `json:"kind"` // wait | retry | approval_timeout | event_timeout
+	Kind        string     `json:"kind"` // wait | retry | deadline | approval_timeout | event_timeout
+	Attempt     int        `json:"attempt,omitempty"`
+	Item        int        `json:"item,omitempty"`
+	Partition   int        `json:"partition"`
 	Fired       bool       `json:"fired"`
 	FiredAt     *time.Time `json:"fired_at,omitempty"`
 }
@@ -328,8 +372,10 @@ type List struct {
 
 type Cursor struct {
 	Meta
-	SourceID string `json:"source_id"`
-	Cursor   string `json:"cursor"`
+	SourceID       string     `json:"source_id"`
+	Cursor         string     `json:"cursor"`
+	LeaseOwner     string     `json:"lease_owner,omitempty"` // one collector polls a source at a time
+	LeaseExpiresAt *time.Time `json:"lease_expires_at,omitempty"`
 }
 
 type RawRecord struct {
@@ -338,7 +384,7 @@ type RawRecord struct {
 	Transport  string    `json:"transport,omitempty"`
 	ReceivedAt time.Time `json:"received_at"`
 	Body       string    `json:"body,omitempty"`     // inline body (64 KB or less)
-	BodyRef    string    `json:"body_ref,omitempty"` // MinIO reference for larger bodies
+	BodyRef    string    `json:"body_ref,omitempty"` // object-storage reference for larger bodies
 	Size       int64     `json:"size,omitempty"`
 	SHA256     string    `json:"sha256,omitempty"`
 	ParseError string    `json:"parse_error,omitempty"`
@@ -347,6 +393,8 @@ type RawRecord struct {
 type Seen struct {
 	Meta
 	Key       string    `json:"key"`
+	EventID   string    `json:"event_id,omitempty"` // lets a redelivered event recognise its own earlier attempt
+	Applied   bool      `json:"applied,omitempty"`  // the event's alert increment is written: a redelivery must not repeat it
 	FirstSeen time.Time `json:"first_seen"`
 }
 
@@ -362,3 +410,26 @@ type Connection struct {
 // MetaPtr lets generic code reach the common fields of any stored document type
 // (every document type embeds Meta, so the method is promoted to all of them).
 func (m *Meta) MetaPtr() *Meta { return m }
+
+// Event is the message published on events.<source>: a normalized alert plus the
+// routing hints the processor needs, so it never has to look up the source.
+type Event struct {
+	EventID        string    `json:"event_id"`
+	SourceID       string    `json:"source_id"`
+	ReceivedAt     time.Time `json:"received_at"`
+	DedupWindowSec int       `json:"dedup_window_sec"`
+	Route          string    `json:"route,omitempty"` // workflow name chosen by a route filter
+	Alert          Alert     `json:"alert"`           // ID and Meta are assigned by the processor
+}
+
+// Evidence is a file attached to a case (spec 5.1: soar-evidence bucket).
+type Evidence struct {
+	ID          string    `json:"id"`
+	Name        string    `json:"name"`
+	Ref         string    `json:"ref"` // blob://soar-evidence/...
+	SHA256      string    `json:"sha256"`
+	Size        int64     `json:"size"`
+	ContentType string    `json:"content_type,omitempty"`
+	AddedBy     string    `json:"added_by,omitempty"`
+	AddedAt     time.Time `json:"added_at"`
+}

@@ -12,15 +12,59 @@ LDFLAGS   := -s -w -X $(MODULE)/internal/obs.Version=$(VERSION) -X $(MODULE)/int
 
 .PHONY: help
 help: ## Show this help
-	@awk 'BEGIN{FS=":.*## "} /^[a-zA-Z_-]+:.*## /{printf "  \033[36m%-18s\033[0m %s\n",$$1,$$2}' $(MAKEFILE_LIST)
+	@awk 'BEGIN{FS=":.*## "} /^[a-zA-Z0-9_-]+:.*## /{printf "  \033[36m%-18s\033[0m %s\n",$$1,$$2}' $(MAKEFILE_LIST)
 
 .PHONY: build
 build: ## Build the soar binary into bin/
 	CGO_ENABLED=0 $(GO) build -trimpath -ldflags '$(LDFLAGS)' -o bin/soar ./cmd/soar
 
-.PHONY: image
-image: ## Build the soar:dev container image
+.PHONY: image image-soar image-runner image-web
+image: image-soar image-runner image-web ## Build all container images (soar, soar-runner, soar-web)
+
+image-soar: ## Build the soar:dev image (every Go role)
 	$(DOCKER) build -f deploy/docker/Dockerfile --build-arg VERSION=$(VERSION) --build-arg COMMIT=$(COMMIT) -t soar:dev .
+
+image-runner: ## Build the soar-runner:dev image (sandboxed Python runner + integrations)
+	$(DOCKER) build -f deploy/docker/runner.Dockerfile -t soar-runner:dev .
+
+image-web: ## Build the soar-web:dev image (React UI behind nginx)
+	$(DOCKER) build -f deploy/docker/web.Dockerfile -t soar-web:dev .
+
+PY_VENV := runner/python/.venv
+PY      := $(PY_VENV)/bin/python
+GOBIN_DIR := $(shell $(GO) env GOPATH)/bin
+
+.PHONY: runner-venv proto test-python web-install web-dev web-test web-build gen-api
+runner-venv: ## Create the Python virtualenv for runner development and tests
+	python3 -m venv $(PY_VENV) && $(PY) -m pip install -q -r runner/python/requirements-dev.txt
+
+proto: ## Regenerate Go and Python stubs from api/proto/runner.proto (needs runner-venv)
+	$(GO) install google.golang.org/protobuf/cmd/protoc-gen-go@v1.34.2
+	$(GO) install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.5.1
+	$(PY) -m grpc_tools.protoc -I api/proto \
+	  --plugin=protoc-gen-go=$(GOBIN_DIR)/protoc-gen-go --plugin=protoc-gen-go-grpc=$(GOBIN_DIR)/protoc-gen-go-grpc \
+	  --go_out=internal/runner/runnerpb --go_opt=paths=source_relative \
+	  --go-grpc_out=internal/runner/runnerpb --go-grpc_opt=paths=source_relative api/proto/runner.proto
+	$(PY) -m grpc_tools.protoc -I api/proto --python_out=runner/python/soar_runner --grpc_python_out=runner/python/soar_runner api/proto/runner.proto
+	sed -i 's/^import runner_pb2 as runner__pb2/from . import runner_pb2 as runner__pb2/' runner/python/soar_runner/runner_pb2_grpc.py
+
+test-python: ## Runner tests (sandbox limits, secret scrubbing, gRPC)
+	cd runner/python && .venv/bin/python -m pytest -q tests
+
+web-install: ## Install UI dependencies
+	cd web && npm ci --no-audit --no-fund
+
+gen-api: ## Regenerate the UI's API types from api/openapi.yaml
+	cd web && npm run gen:api
+
+web-dev: ## UI dev server on :3000 (proxies /api to 127.0.0.1:8080)
+	cd web && npm run dev
+
+web-test: ## UI unit tests and type check
+	cd web && npm run typecheck && npm test
+
+web-build: ## Production UI bundle in web/dist
+	cd web && npm run build
 
 .PHONY: up
 up: image ## Build the image, start the stack, wait until /readyz is 200
@@ -48,6 +92,27 @@ logs: ## Follow logs (make logs S=api to pick a service)
 migrate: image ## Apply index templates, indices and retention policies (safe to repeat)
 	$(COMPOSE) $(COMPOSE_F) run --rm migrate
 
+.PHONY: nats-relaxed nats-always
+nats-relaxed: ## NATS fsync every 200 ms (needed for 1,000+ events/s on ordinary disks; see README)
+	@touch deploy/compose/.env && sed -i '/^NATS_CONF=/d' deploy/compose/.env && echo 'NATS_CONF=nats-relaxed.conf' >> deploy/compose/.env
+	$(COMPOSE) $(COMPOSE_F) up -d --force-recreate nats
+nats-always: ## NATS fsync on every write (spec default for one node)
+	@touch deploy/compose/.env && sed -i '/^NATS_CONF=/d' deploy/compose/.env
+	$(COMPOSE) $(COMPOSE_F) up -d --force-recreate nats
+
+.PHONY: seed
+seed: image ## Install the built-in source packs (Wazuh); safe to repeat
+	$(COMPOSE) $(COMPOSE_F) run --rm seed
+
+.PHONY: loadtest loadtest-burst
+RATE ?= 1000
+DURATION ?= 60s
+loadtest: ## Zero-loss load test through ingest -> NATS -> processor -> OpenSearch (RATE, DURATION)
+	go run ./cmd/loadgen -rate $(RATE) -duration $(DURATION)
+
+loadtest-burst: ## 2,000/s burst for 60 s (spec 3.3)
+	go run ./cmd/loadgen -rate 2000 -duration 60s -drain-timeout 5m
+
 .PHONY: migrate-check
 migrate-check: image ## Verify live indices match the schema (Step 2 exit gate); changes nothing
 	$(COMPOSE) $(COMPOSE_F) run --rm migrate migrate-check
@@ -57,8 +122,11 @@ smoke: ## curl /readyz on the api (Step 1 exit gate)
 	@curl -fsS -i http://127.0.0.1:8080/readyz && echo
 
 .PHONY: test
-test: ## Unit tests
+test: ## Unit tests (Go)
 	$(GO) test ./...
+
+.PHONY: test-all
+test-all: test test-python web-test ## Go, Python runner and UI tests
 
 .PHONY: test-race
 test-race: ## Unit tests with the race detector (needs gcc)
@@ -67,6 +135,34 @@ test-race: ## Unit tests with the race detector (needs gcc)
 .PHONY: test-integration
 test-integration: ## Integration tests against a running stack (make up first)
 	$(GO) test -tags integration -count=1 ./test/integration/...
+
+.PHONY: test-security vulncheck
+test-security: ## Security suite (Step 9 gate): authN/Z matrix, API keys, secrets, audit, scrubbing, SSRF, TLS/mTLS, limits, sandbox
+	$(GO) test -count=1 ./internal/security/... ./internal/config/... ./internal/obs/... ./internal/policy/... ./cmd/soar/...
+	$(GO) test -count=1 -run 'TestSecurity|TestAuthenticationAuthorisationAndAudit' ./internal/api/...
+	$(GO) test -count=1 -run 'TestFlowSecrets|TestFlowDryRunWrites|TestFlowDestructiveActionNeedsApproval' ./internal/e2e/...
+	$(GO) test -count=1 -run 'TestSSRFGuard' ./internal/actions/...
+	$(GO) test -count=1 -run 'TestAuthentication|TestRejections' ./internal/ingest/...
+	$(GO) test -count=1 -run 'PrivateCA' ./internal/store/opensearch/...
+	cd runner/python && .venv/bin/python -m pytest -q tests -k "secrets or environment or path_escape or limit or timeout"
+
+vulncheck: ## Known-vulnerability scan of Go modules and the runner's Python packages (network)
+	$(GO) run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
+	$(PY) -m pip install -q pip-audit==2.10.1 && $(PY) -m pip_audit -r runner/python/requirements.txt
+
+.PHONY: check-steps check-step5 check-step6 check-step7
+check-steps: ## Live PASS/FAIL checks of Steps 5, 6 and 7 against the running stack (~3 min)
+	$(GO) run ./cmd/stepcheck
+check-step5: ## Live checks of Step 5 only (ingestion, queue, filters, DLQ)
+	$(GO) run ./cmd/stepcheck -step 5
+check-step6: ## Live checks of Step 6 only (engine)
+	$(GO) run ./cmd/stepcheck -step 6
+check-step7: ## Live checks of Step 7 only (worker, runner, SSRF, secrets)
+	$(GO) run ./cmd/stepcheck -step 7
+
+.PHONY: sync-pull-source
+sync-pull-source: ## Copy the current wazuh-pull pack config onto an existing (older) wazuh-pull source
+	$(GO) run ./cmd/stepcheck -sync-pull-source
 
 .PHONY: vet
 vet: ## go vet
@@ -87,4 +183,4 @@ tidy: ## go mod tidy
 .PHONY: tools
 tools: ## Install gofumpt and golangci-lint into $(go env GOPATH)/bin
 	$(GO) install mvdan.cc/gofumpt@v0.7.0
-	$(GO) install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.64.8
+	$(GO) install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.15.0

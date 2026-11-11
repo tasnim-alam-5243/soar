@@ -1,0 +1,12 @@
+{
+  "id": "AAMkAGI2TG93AAA=",
+  "internetMessageId": "<abc123@evil.example>",
+  "subject": "Your mailbox is full",
+  "from": { "emailAddress": { "name": "IT Support", "address": "it-support@evil.example" } },
+  "sender": { "emailAddress": { "name": "IT Support", "address": "it-support@evil.example" } },
+  "receivedDateTime": "2026-11-09T08:05:00Z",
+  "bodyPreview": "Click https://evil.example/login to keep your mailbox",
+  "body": { "contentType": "text", "content": "Click https://evil.example/login?u=bob to keep your mailbox. Server 203.0.113.7" },
+  "hasAttachments": false,
+  "webLink": "https://outlook.office365.com/owa/?ItemID=AAMk"
+}

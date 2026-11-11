@@ -1,0 +1,58 @@
+{
+  "dedup_window_sec": 600,
+  "description": "File '/etc/ld.so.cache' modified\nMode: scheduled\nChanged attributes: size,mtime,md5,sha1,sha256\n",
+  "entities": {
+    "hosts": [
+      "web01"
+    ]
+  },
+  "external_id": "1793257000.13000",
+  "fingerprint": "10a684c76fd7f8f17fd74b35a7cf9e87742a5d7bf4a756bceda4446be915f7d6",
+  "kind": "alert",
+  "mitre": {
+    "tactics": [
+      "Impact"
+    ],
+    "technique_ids": [
+      "T1565.001"
+    ],
+    "techniques": [
+      "Stored Data Manipulation"
+    ]
+  },
+  "observables": [
+    {
+      "type": "host",
+      "value": "web01"
+    },
+    {
+      "type": "file_path",
+      "value": "/etc/ld.so.cache"
+    },
+    {
+      "type": "hash",
+      "value": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+    },
+    {
+      "type": "hash",
+      "value": "aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d"
+    },
+    {
+      "type": "hash",
+      "value": "5d41402abc4b2a76b9719d911017c592"
+    }
+  ],
+  "occurred_at": "2026-10-29T06:56:40.456Z",
+  "original_severity": "7",
+  "route": "",
+  "severity": 3,
+  "source_id": "wazuh-prod",
+  "system": "wazuh-prod",
+  "tags": [
+    "ossec",
+    "syscheck",
+    "syscheck_entry_modified",
+    "syscheck_file"
+  ],
+  "title": "Integrity checksum changed."
+}

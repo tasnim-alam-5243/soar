@@ -59,4 +59,5 @@ func (h ctxHandler) Handle(ctx context.Context, r slog.Record) error {
 }
 
 func (h ctxHandler) WithAttrs(a []slog.Attr) slog.Handler { return ctxHandler{h.Handler.WithAttrs(a)} }
-func (h ctxHandler) WithGroup(n string) slog.Handler      { return ctxHandler{h.Handler.WithGroup(n)} }
+
+func (h ctxHandler) WithGroup(n string) slog.Handler { return ctxHandler{h.Handler.WithGroup(n)} }

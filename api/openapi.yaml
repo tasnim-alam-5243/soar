@@ -1,18 +1,22 @@
 openapi: 3.0.3
 info:
   title: SOAR Platform API
-  version: 0.1.0
+  version: 0.2.0
   description: |
     REST API of the SOAR platform (spec section 11). This file is the source of truth:
     change it first, then the code. Contract tests fail when a route and this document disagree.
 
-    **No authentication yet.** Authentication and roles arrive in Step 9; until then bind the
-    API to localhost only.
+    **Authentication:** every operation except this document needs `Authorization: Bearer <token>`,
+    an OIDC access token from Keycloak or an API key (`soar_...`). Permissions follow the caller's
+    roles (admin, engineer, analyst, viewer, service; see GET /roles). Missing or invalid credentials
+    give 401, missing permissions 403. Every successful mutation is written to the audit log.
 
     Conventions: JSON bodies; timestamps are RFC 3339 UTC; cursor pagination (`limit` 1-200,
     `cursor` from the previous page's `next_cursor`); errors are RFC 9457 `application/problem+json`;
     `Idempotency-Key` on creates; `ETag` on single resources and optional `If-Match` on updates
     (409 on mismatch); `X-Request-ID` on every response.
+security:
+  - bearer: []
 servers:
   - url: /api/v1
 paths:
@@ -115,9 +119,51 @@ paths:
     parameters: [{ $ref: '#/components/parameters/Id' }]
     post:
       operationId: runWorkflow
-      summary: Start an execution (needs the engine; returns 501 until Steps 6-7)
+      summary: Start an execution (published versions; drafts only with dry_run)
+      description: |
+        Creates a queued execution and hands it to the orchestrator. The response is 202: the
+        execution runs asynchronously; follow it with GET /executions/{id} or GET /stream.
+        With dry_run, write and destructive actions that support it only report what they would do,
+        and those that do not are skipped.
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody: { required: false, content: { application/json: { schema: { $ref: '#/components/schemas/RunRequest' } } } }
       responses:
-        '501': { $ref: '#/components/responses/Problem' }
+        '202': { $ref: '#/components/responses/ExecutionAccepted' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        '503': { $ref: '#/components/responses/Problem' }
+        default: { $ref: '#/components/responses/Problem' }
+
+  /me:
+    get:
+      operationId: getMe
+      summary: The authenticated caller, its roles and permissions
+      responses:
+        '200': { description: The caller, content: { application/json: { schema: { $ref: '#/components/schemas/Me' } } } }
+        default: { $ref: '#/components/responses/Problem' }
+
+  /dashboard:
+    get:
+      operationId: getDashboard
+      summary: Dashboard figures (alert volume, open cases, MTTR, automation rate, queue and source health)
+      responses:
+        '200': { description: The figures, content: { application/json: { schema: { $ref: '#/components/schemas/Dashboard' } } } }
+        default: { $ref: '#/components/responses/Problem' }
+
+  /stream:
+    get:
+      operationId: streamEvents
+      summary: Server-sent events for execution, case, approval and alert changes
+      description: |
+        Each event is `event: <topic>` with a JSON `UIEvent` as data. Browsers (EventSource) cannot
+        send headers, so the access token may be passed as `access_token` instead.
+      parameters:
+        - { name: topics, in: query, description: comma-separated topics (default all), schema: { type: string } }
+        - { name: access_token, in: query, schema: { type: string } }
+      responses:
+        '200': { description: An endless event stream, content: { text/event-stream: { schema: { type: string } } } }
         default: { $ref: '#/components/responses/Problem' }
 
   /executions:
@@ -165,9 +211,68 @@ paths:
     parameters: [{ $ref: '#/components/parameters/Id' }]
     post:
       operationId: cancelExecution
-      summary: Cancel an execution (needs the engine; returns 501 until Steps 6-8)
+      summary: Ask the orchestrator to cancel a running or waiting execution
+      requestBody: { required: false, content: { application/json: { schema: { $ref: '#/components/schemas/CancelRequest' } } } }
       responses:
-        '501': { $ref: '#/components/responses/Problem' }
+        '202': { description: Cancel requested, content: { application/json: { schema: { $ref: '#/components/schemas/Execution' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '503': { $ref: '#/components/responses/Problem' }
+        default: { $ref: '#/components/responses/Problem' }
+
+  /executions/{id}/retry:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    post:
+      operationId: retryExecution
+      summary: Start a new execution with the same workflow version, inputs and alert
+      responses:
+        '202': { $ref: '#/components/responses/ExecutionAccepted' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '503': { $ref: '#/components/responses/Problem' }
+        default: { $ref: '#/components/responses/Problem' }
+
+  /approvals:
+    get:
+      operationId: listApprovals
+      summary: Human decisions requested by approval nodes and by policy
+      parameters:
+        - { $ref: '#/components/parameters/Limit' }
+        - { $ref: '#/components/parameters/Cursor' }
+        - { name: sort, in: query, schema: { type: string, enum: [created_at, -created_at, due_at, -due_at] } }
+        - { name: status, in: query, schema: { type: string } }
+        - { name: execution_id, in: query, schema: { type: string } }
+        - { name: workflow_id, in: query, schema: { type: string } }
+      responses:
+        '200': { description: A page of approvals, content: { application/json: { schema: { $ref: '#/components/schemas/ApprovalPage' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        default: { $ref: '#/components/responses/Problem' }
+
+  /approvals/{id}:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    get:
+      operationId: getApproval
+      summary: Get one approval
+      responses:
+        '200': { description: The approval, headers: { ETag: { schema: { type: string } } }, content: { application/json: { schema: { $ref: '#/components/schemas/Approval' } } } }
+        '404': { $ref: '#/components/responses/Problem' }
+        default: { $ref: '#/components/responses/Problem' }
+
+  /approvals/{id}/decision:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    post:
+      operationId: decideApproval
+      summary: Approve or reject (analysts and above, or a named approver)
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/Decision' } } } }
+      responses:
+        '200': { description: The decided approval, headers: { ETag: { schema: { type: string } } }, content: { application/json: { schema: { $ref: '#/components/schemas/Approval' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        '503': { $ref: '#/components/responses/Problem' }
         default: { $ref: '#/components/responses/Problem' }
 
   /alerts:
@@ -211,6 +316,21 @@ paths:
       responses:
         '200': { description: The alert, headers: { ETag: { schema: { type: string } } }, content: { application/json: { schema: { $ref: '#/components/schemas/Alert' } } } }
         '404': { $ref: '#/components/responses/Problem' }
+        default: { $ref: '#/components/responses/Problem' }
+
+  /alerts/{id}/case:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    post:
+      operationId: alertToCase
+      summary: Link the alert to a case, or open a new case from it (201 when created)
+      description: The alert is copied into the case (it outlives the alert's retention) and its observables are linked to the case.
+      requestBody: { required: false, content: { application/json: { schema: { $ref: '#/components/schemas/AlertToCase' } } } }
+      responses:
+        '200': { $ref: '#/components/responses/CaseLinked' }
+        '201': { $ref: '#/components/responses/CaseLinked' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
         default: { $ref: '#/components/responses/Problem' }
 
   /cases:
@@ -287,6 +407,77 @@ paths:
         '200': { description: A page of tasks, content: { application/json: { schema: { $ref: '#/components/schemas/CaseTaskPage' } } } }
         '400': { $ref: '#/components/responses/Problem' }
         '404': { $ref: '#/components/responses/Problem' }
+        default: { $ref: '#/components/responses/Problem' }
+
+  /cases/{id}/tasks/{task_id}:
+    parameters:
+      - { $ref: '#/components/parameters/Id' }
+      - { name: task_id, in: path, required: true, schema: { type: string, minLength: 1 } }
+    patch:
+      operationId: patchCaseTask
+      summary: Update a task (status, assignee, due date)
+      parameters: [{ $ref: '#/components/parameters/IfMatch' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/CaseTaskPatch' } } } }
+      responses:
+        '200': { description: Updated, headers: { ETag: { schema: { type: string } } }, content: { application/json: { schema: { $ref: '#/components/schemas/CaseTask' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        default: { $ref: '#/components/responses/Problem' }
+
+  /cases/{id}/alerts:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    post:
+      operationId: linkCaseAlerts
+      summary: Link alerts to the case (each is copied into soar-case-alerts)
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/CaseAlertsLink' } } } }
+      responses:
+        '200': { description: The case, headers: { ETag: { schema: { type: string } } }, content: { application/json: { schema: { $ref: '#/components/schemas/Case' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        default: { $ref: '#/components/responses/Problem' }
+    get:
+      operationId: listCaseAlerts
+      summary: Alert snapshots linked to the case
+      parameters:
+        - { $ref: '#/components/parameters/Limit' }
+        - { $ref: '#/components/parameters/Cursor' }
+        - { name: sort, in: query, schema: { type: string, enum: [linked_at, -linked_at] } }
+      responses:
+        '200': { description: A page of alert snapshots, content: { application/json: { schema: { $ref: '#/components/schemas/CaseAlertPage' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        default: { $ref: '#/components/responses/Problem' }
+
+  /cases/{id}/evidence:
+    parameters:
+      - { $ref: '#/components/parameters/Id' }
+      - { name: filename, in: query, required: true, schema: { type: string, maxLength: 255 } }
+    post:
+      operationId: uploadCaseEvidence
+      summary: Upload a file (raw request body, up to 25 MB) to soar-evidence
+      requestBody: { required: true, content: { application/octet-stream: { schema: { type: string, format: binary } } } }
+      responses:
+        '201': { description: Stored, content: { application/json: { schema: { $ref: '#/components/schemas/Evidence' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        '503': { $ref: '#/components/responses/Problem' }
+        default: { $ref: '#/components/responses/Problem' }
+
+  /cases/{id}/evidence/{eid}:
+    parameters:
+      - { $ref: '#/components/parameters/Id' }
+      - { name: eid, in: path, required: true, schema: { type: string, minLength: 1 } }
+    get:
+      operationId: getCaseEvidenceURL
+      summary: A short-lived presigned download URL for one evidence file
+      responses:
+        '200': { description: Download link, content: { application/json: { schema: { $ref: '#/components/schemas/EvidenceLink' } } } }
+        '404': { $ref: '#/components/responses/Problem' }
+        '503': { $ref: '#/components/responses/Problem' }
         default: { $ref: '#/components/responses/Problem' }
 
   /cases/{id}/observables:
@@ -385,7 +576,390 @@ paths:
         '404': { $ref: '#/components/responses/Problem' }
         default: { $ref: '#/components/responses/Problem' }
 
+  /connections/{id}/test:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    post:
+      operationId: testConnection
+      summary: Run the connector's connection test through the worker and wait (up to 35 s) for the result
+      responses:
+        '200': { description: Test outcome, content: { application/json: { schema: { $ref: '#/components/schemas/ConnectionTestResult' } } } }
+        '404': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        '503': { $ref: '#/components/responses/Problem' }
+        default: { $ref: '#/components/responses/Problem' }
+
+  /sources:
+    post:
+      operationId: createSource
+      summary: Add a data source (webhook push or a pull adapter such as poll_http)
+      description: |
+        The name is the source's identity and, for webhook sources, the URL segment of `POST /ingest/{name}`.
+        Secrets are never accepted inline: `auth.token_ref` / `secret_ref` name a secret as `env:NAME`.
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/SourceCreate' } } } }
+      responses:
+        '201': { description: Created, headers: { Location: { schema: { type: string } }, ETag: { schema: { type: string } } }, content: { application/json: { schema: { $ref: '#/components/schemas/Source' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        default: { $ref: '#/components/responses/Problem' }
+    get:
+      operationId: listSources
+      summary: List sources
+      parameters:
+        - { $ref: '#/components/parameters/Limit' }
+        - { $ref: '#/components/parameters/Cursor' }
+        - { name: sort, in: query, schema: { type: string, enum: [created_at, -created_at, name, -name] } }
+        - { name: adapter, in: query, schema: { type: string } }
+        - { name: enabled, in: query, schema: { type: string, enum: ['true', 'false'] } }
+        - { name: system, in: query, schema: { type: string } }
+      responses:
+        '200': { description: A page of sources, content: { application/json: { schema: { $ref: '#/components/schemas/SourcePage' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        default: { $ref: '#/components/responses/Problem' }
+
+  /sources/{id}:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    get:
+      operationId: getSource
+      summary: Get one source
+      responses:
+        '200': { description: The source, headers: { ETag: { schema: { type: string } } }, content: { application/json: { schema: { $ref: '#/components/schemas/Source' } } } }
+        '404': { $ref: '#/components/responses/Problem' }
+        default: { $ref: '#/components/responses/Problem' }
+    patch:
+      operationId: patchSource
+      summary: Change a source; the running services pick it up within seconds
+      parameters: [{ $ref: '#/components/parameters/IfMatch' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/SourcePatch' } } } }
+      responses:
+        '200': { description: The updated source, headers: { ETag: { schema: { type: string } } }, content: { application/json: { schema: { $ref: '#/components/schemas/Source' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        default: { $ref: '#/components/responses/Problem' }
+
+  /sources/{id}/test:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    post:
+      operationId: testSource
+      summary: Run a sample payload through the source's parser, filters and mapping without publishing it
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/SourceTestRequest' } } } }
+      responses:
+        '200': { description: What would have been published, content: { application/json: { schema: { $ref: '#/components/schemas/SourceTestResult' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        default: { $ref: '#/components/responses/Problem' }
+
+  /sources/{id}/health:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    get:
+      operationId: getSourceHealth
+      summary: Last event time, rate and error rate of a source
+      responses:
+        '200': { description: Health, content: { application/json: { schema: { $ref: '#/components/schemas/SourceHealth' } } } }
+        '404': { $ref: '#/components/responses/Problem' }
+        default: { $ref: '#/components/responses/Problem' }
+
+  /mappings:
+    post:
+      operationId: createMapping
+      summary: Publish a new version of a mapping (versions are immutable)
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/MappingCreate' } } } }
+      responses:
+        '201': { description: Created, headers: { Location: { schema: { type: string } }, ETag: { schema: { type: string } } }, content: { application/json: { schema: { $ref: '#/components/schemas/Mapping' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        default: { $ref: '#/components/responses/Problem' }
+    get:
+      operationId: listMappings
+      summary: List mapping versions
+      parameters:
+        - { $ref: '#/components/parameters/Limit' }
+        - { $ref: '#/components/parameters/Cursor' }
+        - { name: sort, in: query, schema: { type: string, enum: [created_at, -created_at, name, -name, version, -version] } }
+        - { name: name, in: query, schema: { type: string } }
+      responses:
+        '200': { description: A page of mappings, content: { application/json: { schema: { $ref: '#/components/schemas/MappingPage' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        default: { $ref: '#/components/responses/Problem' }
+
+  /mappings/test:
+    post:
+      operationId: testMapping
+      summary: Map a sample record; returns the normalized alert or the exact failing expression
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/MappingTestRequest' } } } }
+      responses:
+        '200': { description: Result, content: { application/json: { schema: { $ref: '#/components/schemas/MappingTestResult' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        default: { $ref: '#/components/responses/Problem' }
+
+  /mappings/{id}:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    get:
+      operationId: getMapping
+      summary: Get one mapping version
+      responses:
+        '200': { description: The mapping, headers: { ETag: { schema: { type: string } } }, content: { application/json: { schema: { $ref: '#/components/schemas/Mapping' } } } }
+        '404': { $ref: '#/components/responses/Problem' }
+        default: { $ref: '#/components/responses/Problem' }
+
+  /filters:
+    post:
+      operationId: createFilterSet
+      summary: Publish a new version of a filter set (versions are immutable)
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/FilterCreate' } } } }
+      responses:
+        '201': { description: Created, headers: { Location: { schema: { type: string } }, ETag: { schema: { type: string } } }, content: { application/json: { schema: { $ref: '#/components/schemas/FilterSet' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        default: { $ref: '#/components/responses/Problem' }
+    get:
+      operationId: listFilterSets
+      summary: List filter set versions
+      parameters:
+        - { $ref: '#/components/parameters/Limit' }
+        - { $ref: '#/components/parameters/Cursor' }
+        - { name: sort, in: query, schema: { type: string, enum: [created_at, -created_at, name, -name, version, -version] } }
+        - { name: name, in: query, schema: { type: string } }
+      responses:
+        '200': { description: A page of filter sets, content: { application/json: { schema: { $ref: '#/components/schemas/FilterPage' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        default: { $ref: '#/components/responses/Problem' }
+
+  /filters/test:
+    post:
+      operationId: testFilterSet
+      summary: Evaluate a filter set on one sample and return a rule-by-rule trace
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/FilterTestRequest' } } } }
+      responses:
+        '200': { description: Decision and trace, content: { application/json: { schema: { $ref: '#/components/schemas/FilterTestResult' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        default: { $ref: '#/components/responses/Problem' }
+
+  /filters/{id}:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    get:
+      operationId: getFilterSet
+      summary: Get one filter set version
+      responses:
+        '200': { description: The filter set, headers: { ETag: { schema: { type: string } } }, content: { application/json: { schema: { $ref: '#/components/schemas/FilterSet' } } } }
+        '404': { $ref: '#/components/responses/Problem' }
+        default: { $ref: '#/components/responses/Problem' }
+
+  /lists:
+    get:
+      operationId: listManagedLists
+      summary: List managed lists (used by in_list() in filters)
+      parameters:
+        - { $ref: '#/components/parameters/Limit' }
+        - { $ref: '#/components/parameters/Cursor' }
+        - { name: sort, in: query, schema: { type: string, enum: [name, -name] } }
+      responses:
+        '200': { description: A page of lists, content: { application/json: { schema: { $ref: '#/components/schemas/ListPage' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        default: { $ref: '#/components/responses/Problem' }
+
+  /lists/{name}:
+    parameters: [{ name: name, in: path, required: true, schema: { type: string, minLength: 1 } }]
+    get:
+      operationId: getManagedList
+      summary: Get one managed list
+      responses:
+        '200': { description: The list, headers: { ETag: { schema: { type: string } } }, content: { application/json: { schema: { $ref: '#/components/schemas/ManagedList' } } } }
+        '404': { $ref: '#/components/responses/Problem' }
+        default: { $ref: '#/components/responses/Problem' }
+    put:
+      operationId: putManagedList
+      summary: Create or replace a list; filters see the change within seconds, with no deploy
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ManagedListPut' } } } }
+      responses:
+        '200': { description: The stored list, headers: { ETag: { schema: { type: string } } }, content: { application/json: { schema: { $ref: '#/components/schemas/ManagedList' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        default: { $ref: '#/components/responses/Problem' }
+
+  /dlq:
+    get:
+      operationId: listDeadLetters
+      summary: Dead-lettered messages, newest first
+      parameters:
+        - { $ref: '#/components/parameters/Limit' }
+        - { $ref: '#/components/parameters/Cursor' }
+      responses:
+        '200': { description: A page of dead letters, content: { application/json: { schema: { $ref: '#/components/schemas/DeadLetterPage' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '503': { $ref: '#/components/responses/Problem' }
+        default: { $ref: '#/components/responses/Problem' }
+
+  /dlq/{id}/replay:
+    parameters: [{ name: id, in: path, required: true, schema: { type: string, minLength: 1 }, description: The dead letter's sequence number }]
+    post:
+      operationId: replayDeadLetter
+      summary: Republish a dead letter to its original subject and remove it from the DLQ
+      responses:
+        '200': { description: Replayed, content: { application/json: { schema: { $ref: '#/components/schemas/ReplayResult' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '503': { $ref: '#/components/responses/Problem' }
+        default: { $ref: '#/components/responses/Problem' }
+
+  /queues/stats:
+    get:
+      operationId: getQueueStats
+      summary: Messages, bytes and consumer lag of every stream
+      responses:
+        '200': { description: Stream statistics, content: { application/json: { schema: { $ref: '#/components/schemas/QueueStats' } } } }
+        '503': { $ref: '#/components/responses/Problem' }
+        default: { $ref: '#/components/responses/Problem' }
+
+  /connectors:
+    get:
+      operationId: listConnectors
+      summary: Integration packages and the built-in actions
+      responses:
+        '200': { description: All connectors, content: { application/json: { schema: { $ref: '#/components/schemas/ConnectorPage' } } } }
+        default: { $ref: '#/components/responses/Problem' }
+
+  /connectors/{id}/actions:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    get:
+      operationId: listConnectorActions
+      summary: Action manifests of one connector (description, side effect, risk, schemas)
+      responses:
+        '200': { description: The actions, content: { application/json: { schema: { $ref: '#/components/schemas/ActionPage' } } } }
+        '404': { $ref: '#/components/responses/Problem' }
+        default: { $ref: '#/components/responses/Problem' }
+
+  /secrets:
+    get:
+      operationId: listSecrets
+      summary: Secret metadata (values are never returned)
+      parameters:
+        - { $ref: '#/components/parameters/Limit' }
+        - { $ref: '#/components/parameters/Cursor' }
+        - { name: sort, in: query, schema: { type: string, enum: [name, -name, updated_at, -updated_at] } }
+      responses:
+        '200': { description: A page of secrets, content: { application/json: { schema: { $ref: '#/components/schemas/SecretPage' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        default: { $ref: '#/components/responses/Problem' }
+
+  /secrets/{name}:
+    parameters: [{ name: name, in: path, required: true, schema: { type: string, minLength: 1 } }]
+    put:
+      operationId: putSecret
+      summary: Create or replace a secret (envelope-encrypted with the master key)
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/SecretPut' } } } }
+      responses:
+        '200': { description: Stored; metadata only, content: { application/json: { schema: { $ref: '#/components/schemas/Secret' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        '503': { $ref: '#/components/responses/Problem' }
+        default: { $ref: '#/components/responses/Problem' }
+    delete:
+      operationId: deleteSecret
+      summary: Delete a secret
+      responses:
+        '204': { description: Deleted }
+        '404': { $ref: '#/components/responses/Problem' }
+        default: { $ref: '#/components/responses/Problem' }
+
+  /principals:
+    post:
+      operationId: createPrincipal
+      summary: Create a user, API key or service principal (an API key is shown once)
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/PrincipalCreate' } } } }
+      responses:
+        '201': { description: Created, headers: { Location: { schema: { type: string } } }, content: { application/json: { schema: { $ref: '#/components/schemas/PrincipalCreated' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        default: { $ref: '#/components/responses/Problem' }
+    get:
+      operationId: listPrincipals
+      summary: List principals
+      parameters:
+        - { $ref: '#/components/parameters/Limit' }
+        - { $ref: '#/components/parameters/Cursor' }
+        - { name: sort, in: query, schema: { type: string, enum: [name, -name, created_at, -created_at] } }
+        - { name: type, in: query, schema: { type: string } }
+        - { name: role, in: query, schema: { type: string } }
+      responses:
+        '200': { description: A page of principals, content: { application/json: { schema: { $ref: '#/components/schemas/PrincipalPage' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        default: { $ref: '#/components/responses/Problem' }
+
+  /principals/{id}:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    get:
+      operationId: getPrincipal
+      summary: Get one principal
+      responses:
+        '200': { description: The principal, headers: { ETag: { schema: { type: string } } }, content: { application/json: { schema: { $ref: '#/components/schemas/Principal' } } } }
+        '404': { $ref: '#/components/responses/Problem' }
+        default: { $ref: '#/components/responses/Problem' }
+    patch:
+      operationId: patchPrincipal
+      summary: Change roles or disable a principal
+      parameters: [{ $ref: '#/components/parameters/IfMatch' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/PrincipalPatch' } } } }
+      responses:
+        '200': { description: Updated, headers: { ETag: { schema: { type: string } } }, content: { application/json: { schema: { $ref: '#/components/schemas/Principal' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        default: { $ref: '#/components/responses/Problem' }
+    delete:
+      operationId: deletePrincipal
+      summary: Delete a principal
+      responses:
+        '204': { description: Deleted }
+        '404': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+        default: { $ref: '#/components/responses/Problem' }
+
+  /roles:
+    get:
+      operationId: listRoles
+      summary: Roles and their permissions
+      responses:
+        '200': { description: All roles, content: { application/json: { schema: { $ref: '#/components/schemas/RolePage' } } } }
+        default: { $ref: '#/components/responses/Problem' }
+
+  /audit:
+    get:
+      operationId: listAudit
+      summary: Audit log (every mutation and secret write)
+      parameters:
+        - { $ref: '#/components/parameters/Limit' }
+        - { $ref: '#/components/parameters/Cursor' }
+        - { name: sort, in: query, schema: { type: string, enum: [created_at, -created_at] } }
+        - { name: actor, in: query, schema: { type: string } }
+        - { name: action, in: query, schema: { type: string } }
+        - { name: resource, in: query, schema: { type: string } }
+        - { name: from, in: query, schema: { type: string, format: date-time } }
+        - { name: to, in: query, schema: { type: string, format: date-time } }
+      responses:
+        '200': { description: A page of audit records, content: { application/json: { schema: { $ref: '#/components/schemas/AuditPage' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        default: { $ref: '#/components/responses/Problem' }
+
 components:
+  securitySchemes:
+    bearer:
+      type: http
+      scheme: bearer
+      description: An OIDC access token from Keycloak, or an API key (soar_...).
   parameters:
     Id: { name: id, in: path, required: true, schema: { type: string, minLength: 1 } }
     Limit: { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 200, default: 50 } }
@@ -413,6 +987,14 @@ components:
       description: Created
       headers: { Location: { schema: { type: string } }, ETag: { schema: { type: string } } }
       content: { application/json: { schema: { $ref: '#/components/schemas/Workflow' } } }
+    CaseLinked:
+      description: The case the alert is linked to
+      headers: { Location: { schema: { type: string } }, ETag: { schema: { type: string } } }
+      content: { application/json: { schema: { $ref: '#/components/schemas/Case' } } }
+    ExecutionAccepted:
+      description: Execution queued
+      headers: { Location: { schema: { type: string } } }
+      content: { application/json: { schema: { $ref: '#/components/schemas/Execution' } } }
 
   schemas:
     Problem:
@@ -446,6 +1028,7 @@ components:
         type: { type: string, enum: [alert, schedule, manual, event] }
         kind: { type: string }
         match: { type: string, description: CEL condition }
+        cron: { type: string, description: 'schedule triggers: 5-field cron (UTC), @hourly, @daily, @every 15m' }
     Workflow:
       allOf:
         - { $ref: '#/components/schemas/Meta' }
@@ -456,7 +1039,7 @@ components:
             description: { type: string }
             version: { type: integer, minimum: 1 }
             status: { type: string, enum: [draft, published, archived] }
-            definition: { type: object }
+            definition: { type: object, additionalProperties: true }
             triggers: { type: array, items: { $ref: '#/components/schemas/Trigger' } }
             checksum: { type: string }
             created_by: { type: string }
@@ -467,20 +1050,20 @@ components:
       properties:
         name: { type: string, minLength: 1, maxLength: 200 }
         description: { type: string, maxLength: 2000 }
-        definition: { type: object }
+        definition: { type: object, additionalProperties: true }
         triggers: { type: array, items: { $ref: '#/components/schemas/Trigger' } }
     WorkflowVersionCreate:
       type: object
       additionalProperties: false
       properties:
         description: { type: string, maxLength: 2000 }
-        definition: { type: object }
+        definition: { type: object, additionalProperties: true }
         triggers: { type: array, items: { $ref: '#/components/schemas/Trigger' } }
     ValidateRequest:
       type: object
       required: [definition]
       additionalProperties: false
-      properties: { definition: { type: object } }
+      properties: { definition: { type: object, additionalProperties: true } }
     ValidateResult:
       type: object
       required: [valid, errors]
@@ -501,7 +1084,9 @@ components:
           required: [workflow_id, workflow_version, status, trigger, partition]
           properties:
             workflow_id: { type: string }
+            workflow_name: { type: string }
             workflow_version: { type: integer }
+            workflow_checksum: { type: string }
             status: { type: string, enum: [queued, running, waiting, succeeded, failed, cancelled, timed_out] }
             trigger:
               type: object
@@ -512,11 +1097,17 @@ components:
                 alert_id: { type: string }
                 event_id: { type: string }
                 user: { type: string }
-            context: { type: object }
+                parent_execution_id: { type: string }
+                parent_node_id: { type: string }
+                retry_of: { type: string }
+                scheduled_for: { type: string, format: date-time }
+            context: { type: object, additionalProperties: true, description: 'engine state: inputs, vars, per-node status, attempts and outputs' }
             pending_nodes: { type: array, items: { type: string } }
-            outbox: { type: array, items: { type: object } }
-            lease: { type: object }
+            outbox: { type: array, items: { type: object, additionalProperties: true } }
+            outbox_pending: { type: boolean }
+            lease: { type: object, additionalProperties: true }
             partition: { type: integer }
+            dry_run: { type: boolean }
             error: { type: string }
             started_at: { type: string, format: date-time }
             ended_at: { type: string, format: date-time }
@@ -534,13 +1125,20 @@ components:
           required: [execution_id, node_id, attempt, status]
           properties:
             execution_id: { type: string }
+            workflow_id: { type: string }
             node_id: { type: string }
             action: { type: string }
             attempt: { type: integer }
+            item: { type: integer }
             status: { type: string }
+            input: { type: object, additionalProperties: true, description: '{"value": params} with secrets redacted' }
+            output: { type: object, additionalProperties: true, description: '{"value": output}' }
+            dry_run: { type: boolean }
+            started_at: { type: string, format: date-time }
+            ended_at: { type: string, format: date-time }
             input_ref: { type: string }
             output_ref: { type: string }
-            error: { type: object }
+            error: { type: object, additionalProperties: true }
             duration_ms: { type: integer }
             idempotency_key: { type: string }
             parent_step_id: { type: string }
@@ -582,10 +1180,10 @@ components:
             category: { type: string }
             tags: { type: array, items: { type: string } }
             observables: { type: array, items: { $ref: '#/components/schemas/ObservableRef' } }
-            entities: { type: object }
-            mitre: { type: object }
+            entities: { type: object, additionalProperties: true }
+            mitre: { type: object, properties: { technique_ids: { type: array, items: { type: string } }, techniques: { type: array, items: { type: string } }, tactics: { type: array, items: { type: string } } } }
             verdict: { type: string }
-            ext: { type: object }
+            ext: { type: object, additionalProperties: true }
             raw_ref: { type: string }
             occurred_at: { type: string, format: date-time }
             received_at: { type: string, format: date-time }
@@ -606,8 +1204,8 @@ components:
         category: { type: string }
         tags: { type: array, items: { type: string } }
         observables: { type: array, items: { $ref: '#/components/schemas/ObservableRef' } }
-        mitre: { type: object }
-        ext: { type: object }
+        mitre: { type: object, additionalProperties: true }
+        ext: { type: object, additionalProperties: true }
     AlertPage:
       type: object
       required: [items]
@@ -626,12 +1224,13 @@ components:
             status: { type: string, enum: [open, in_progress, closed] }
             severity: { type: integer, minimum: 1, maximum: 5 }
             assignee: { type: string }
-            sla: { type: object }
+            sla: { type: object, additionalProperties: true }
             alert_ids: { type: array, items: { type: string } }
             tags: { type: array, items: { type: string } }
             verdict: { type: string, enum: ['', true_positive, false_positive, benign, unknown] }
-            external_refs: { type: array, items: { type: object } }
+            external_refs: { type: array, items: { type: object, required: [system, id], properties: { system: { type: string }, id: { type: string }, url: { type: string }, last_synced_at: { type: string, format: date-time }, sync_version: { type: integer } } } }
             closed_at: { type: string, format: date-time }
+            evidence: { type: array, items: { $ref: '#/components/schemas/Evidence' } }
     CaseCreate:
       type: object
       required: [title]
@@ -642,6 +1241,7 @@ components:
         severity: { type: integer, minimum: 1, maximum: 5, default: 3 }
         assignee: { type: string }
         tags: { type: array, items: { type: string } }
+        alert_ids: { type: array, maxItems: 200, items: { type: string }, description: Alerts to link right away }
     CasePatch:
       type: object
       additionalProperties: false
@@ -703,7 +1303,7 @@ components:
             value: { type: string }
             first_seen: { type: string, format: date-time }
             last_seen: { type: string, format: date-time }
-            reputation: { type: object }
+            reputation: { type: object, additionalProperties: true }
             case_ids: { type: array, items: { type: string } }
     ObservablePage:
       type: object
@@ -720,7 +1320,7 @@ components:
             subject_id: { type: string }
             event_type: { type: string }
             actor: { type: string }
-            data: { type: object }
+            data: { type: object, additionalProperties: true }
     TimelinePage:
       type: object
       required: [items]
@@ -737,8 +1337,8 @@ components:
             connector_id: { type: string }
             name: { type: string }
             auth_type: { type: string }
-            secret_refs: { type: object }
-            config: { type: object }
+            secret_refs: { type: object, additionalProperties: true }
+            config: { type: object, additionalProperties: true }
     ConnectionCreate:
       type: object
       required: [connector_id, name, auth_type]
@@ -747,11 +1347,544 @@ components:
         connector_id: { type: string, minLength: 1, maxLength: 100 }
         name: { type: string, minLength: 1, maxLength: 200 }
         auth_type: { type: string, enum: [none, api_key, basic, bearer, oauth2_client_credentials] }
-        secret_refs: { type: object, description: Map of credential name to the NAME of a stored secret. Never the secret itself. }
-        config: { type: object }
+        secret_refs: { type: object, additionalProperties: true, description: Map of credential name to the NAME of a stored secret. Never the secret itself. }
+        config: { type: object, additionalProperties: true }
     ConnectionPage:
       type: object
       required: [items]
       properties:
         items: { type: array, items: { $ref: '#/components/schemas/Connection' } }
         next_cursor: { type: string }
+
+    Source:
+      allOf:
+        - { $ref: '#/components/schemas/Meta' }
+        - type: object
+          required: [name, adapter, parser, mapping_id, enabled]
+          properties:
+            name: { type: string }
+            system: { type: string }
+            adapter: { type: string }
+            parser: { type: string }
+            mapping_id: { type: string, description: 'name@version' }
+            filters: { type: array, items: { type: string } }
+            auth: { type: object, additionalProperties: true }
+            schedule: { type: string }
+            dedup: { type: object, additionalProperties: true }
+            rate_limit: { type: object, additionalProperties: true }
+            config: { type: object, additionalProperties: true }
+            enabled: { type: boolean }
+            health: { type: object, properties: { status: { type: string }, last_event_at: { type: string, format: date-time }, rate_per_sec: { type: number }, error_rate: { type: number }, lag_seconds: { type: number } } }
+    SourceCreate:
+      type: object
+      required: [name, adapter, parser, mapping]
+      additionalProperties: false
+      properties:
+        name: { type: string }
+        system: { type: string }
+        adapter: { type: string }
+        parser: { type: string }
+        mapping: { type: string, description: 'name@version' }
+        filters: { type: array, items: { type: string } }
+        auth: { type: object, additionalProperties: true }
+        schedule: { type: string }
+        dedup: { type: object, additionalProperties: true }
+        rate_limit: { type: object, additionalProperties: true }
+        config: { type: object, additionalProperties: true }
+        enabled: { type: boolean }
+    SourcePatch:
+      type: object
+      additionalProperties: false
+      properties:
+        system: { type: string }
+        mapping: { type: string }
+        filters: { type: array, items: { type: string } }
+        auth: { type: object, additionalProperties: true }
+        schedule: { type: string }
+        dedup: { type: object, additionalProperties: true }
+        rate_limit: { type: object, additionalProperties: true }
+        config: { type: object, additionalProperties: true }
+        enabled: { type: boolean }
+    SourcePage:
+      type: object
+      required: [items]
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/Source' } }
+        next_cursor: { type: string }
+    SourceTestRequest:
+      type: object
+      required: [payload]
+      additionalProperties: false
+      properties:
+        payload: { description: A JSON value, or a string for text formats such as ndjson }
+    SourceTestResult:
+      type: object
+      required: [events, filtered, failures, rules_fired]
+      properties:
+        events: { type: array, items: { type: object, additionalProperties: true } }
+        filtered: { type: integer }
+        failures:
+          type: array
+          items:
+            type: object
+            required: [stage, error]
+            properties: { stage: { type: string }, error: { type: string } }
+        rules_fired: { type: object, additionalProperties: true }
+    SourceHealth:
+      type: object
+      required: [source, enabled]
+      properties:
+        source: { type: string }
+        enabled: { type: boolean }
+        health: { type: object, additionalProperties: true }
+
+    Mapping:
+      allOf:
+        - { $ref: '#/components/schemas/Meta' }
+        - type: object
+          required: [name, version, kind, definition]
+          properties:
+            name: { type: string }
+            version: { type: integer, minimum: 1 }
+            kind: { type: string }
+            definition: { type: object, additionalProperties: true }
+            checksum: { type: string }
+    MappingCreate:
+      type: object
+      required: [name, definition]
+      additionalProperties: false
+      properties:
+        name: { type: string }
+        kind: { type: string }
+        definition: { type: object, additionalProperties: true }
+    MappingPage:
+      type: object
+      required: [items]
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/Mapping' } }
+        next_cursor: { type: string }
+    MappingTestRequest:
+      type: object
+      required: [sample]
+      additionalProperties: false
+      properties:
+        mapping: { type: string, description: 'name@version of a stored mapping' }
+        definition: { type: object, additionalProperties: true, description: An unsaved mapping to try }
+        sample: { type: object, additionalProperties: true }
+    MappingTestResult:
+      type: object
+      required: [valid]
+      properties:
+        valid: { type: boolean }
+        alert: { type: object, additionalProperties: true }
+        dedup_key: { type: array, items: { type: string } }
+        error:
+          type: object
+          required: [message]
+          properties: { field: { type: string }, expr: { type: string }, message: { type: string } }
+
+    FilterSet:
+      allOf:
+        - { $ref: '#/components/schemas/Meta' }
+        - type: object
+          required: [name, version, mode, default, rules]
+          properties:
+            name: { type: string }
+            version: { type: integer, minimum: 1 }
+            mode: { type: string, enum: [first_match, all] }
+            default: { type: string, enum: [keep, drop] }
+            rules: { type: array, items: { type: object, additionalProperties: true } }
+            checksum: { type: string }
+    FilterCreate:
+      type: object
+      required: [name, rules]
+      additionalProperties: false
+      properties:
+        name: { type: string }
+        mode: { type: string, enum: [first_match, all] }
+        default: { type: string, enum: [keep, drop] }
+        rules: { type: array, items: { type: object, additionalProperties: true } }
+    FilterPage:
+      type: object
+      required: [items]
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/FilterSet' } }
+        next_cursor: { type: string }
+    FilterTestRequest:
+      type: object
+      required: [sample]
+      additionalProperties: false
+      properties:
+        filter_set: { type: string, description: 'name@version of a stored filter set' }
+        inline: { type: object, additionalProperties: true, description: An unsaved filter set (mode, default, rules) }
+        stage: { type: string, enum: [pre_map, post_map] }
+        sample: { type: object, additionalProperties: true }
+    FilterTestResult:
+      type: object
+      required: [drop, tags, trace]
+      properties:
+        drop: { type: boolean }
+        rule: { type: string }
+        tags: { type: array, items: { type: string } }
+        severity: { type: integer }
+        route: { type: string }
+        trace:
+          type: array
+          items:
+            type: object
+            required: [rule, matched]
+            properties:
+              rule: { type: string }
+              matched: { type: boolean }
+              action: { type: string }
+              error: { type: string }
+
+    ManagedList:
+      allOf:
+        - { $ref: '#/components/schemas/Meta' }
+        - type: object
+          required: [name, items]
+          properties:
+            name: { type: string }
+            items: { type: array, items: { type: string } }
+    ManagedListPut:
+      type: object
+      required: [items]
+      additionalProperties: false
+      properties:
+        items: { type: array, items: { type: string, minLength: 1, maxLength: 512 }, maxItems: 100000 }
+    ListPage:
+      type: object
+      required: [items]
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/ManagedList' } }
+        next_cursor: { type: string }
+
+    DeadLetter:
+      type: object
+      required: [seq, subject, origin_subject, reason, stored_at, size]
+      properties:
+        seq: { type: integer }
+        subject: { type: string }
+        origin_subject: { type: string }
+        reason: { type: string }
+        deliveries: { type: integer }
+        stored_at: { type: string, format: date-time }
+        size: { type: integer }
+    DeadLetterPage:
+      type: object
+      required: [items]
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/DeadLetter' } }
+        next_cursor: { type: string }
+    ReplayResult:
+      type: object
+      required: [replayed]
+      properties: { replayed: { type: integer } }
+    QueueStats:
+      type: object
+      required: [streams, at]
+      properties:
+        at: { type: string, format: date-time }
+        streams:
+          type: array
+          items:
+            type: object
+            required: [name, messages, bytes, max_bytes]
+            properties:
+              name: { type: string }
+              messages: { type: integer }
+              bytes: { type: integer }
+              max_bytes: { type: integer }
+              consumers:
+                type: array
+                items:
+                  type: object
+                  required: [name, pending, ack_pending, redelivered]
+                  properties:
+                    name: { type: string }
+                    pending: { type: integer }
+                    ack_pending: { type: integer }
+                    redelivered: { type: integer }
+
+    RunRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        inputs: { type: object, additionalProperties: true, description: Workflow inputs; override inputs computed from the alert }
+        alert_id: { type: string, description: Run against this alert (available as alert in expressions) }
+        dry_run: { type: boolean }
+    CancelRequest:
+      type: object
+      additionalProperties: false
+      properties: { reason: { type: string, maxLength: 2000 } }
+
+    Approval:
+      allOf:
+        - { $ref: '#/components/schemas/Meta' }
+        - type: object
+          required: [execution_id, node_id, approvers, status, due_at]
+          properties:
+            execution_id: { type: string }
+            node_id: { type: string }
+            workflow_id: { type: string }
+            workflow_name: { type: string }
+            partition: { type: integer }
+            approvers: { type: array, items: { type: string } }
+            message: { type: string }
+            action: { type: string, description: set for policy approvals (the held-back action) }
+            command: { type: object, additionalProperties: true }
+            risk: { type: string }
+            status: { type: string, enum: [pending, approved, rejected, expired, cancelled] }
+            decided_by: { type: string }
+            decided_at: { type: string, format: date-time }
+            comment: { type: string }
+            due_at: { type: string, format: date-time }
+    ApprovalPage:
+      type: object
+      required: [items]
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/Approval' } }
+        next_cursor: { type: string }
+    Decision:
+      type: object
+      required: [approved]
+      additionalProperties: false
+      properties:
+        approved: { type: boolean }
+        comment: { type: string, maxLength: 4000 }
+
+    Connector:
+      type: object
+      required: [id, actions, builtin]
+      properties:
+        id: { type: string }
+        title: { type: string }
+        description: { type: string }
+        version: { type: string }
+        auth_type: { type: string }
+        connection_schema: { type: object, additionalProperties: true }
+        secrets: { type: array, items: { type: string } }
+        actions: { type: array, items: { type: string } }
+        builtin: { type: boolean }
+    ConnectorPage:
+      type: object
+      required: [items]
+      properties: { items: { type: array, items: { $ref: '#/components/schemas/Connector' } } }
+    ActionManifest:
+      type: object
+      required: [id, version, description, side_effect, risk, supports_dry_run, class, at_most_once, limits]
+      properties:
+        id: { type: string }
+        version: { type: integer }
+        title: { type: string }
+        description: { type: string }
+        side_effect: { type: string, enum: [read, write, destructive] }
+        risk: { type: string, enum: [low, medium, high] }
+        supports_dry_run: { type: boolean }
+        class: { type: string, enum: [builtin, python] }
+        params_schema: { type: object, additionalProperties: true }
+        output_schema: { type: object, additionalProperties: true }
+        secrets: { type: array, items: { type: string } }
+        retryable_errors: { type: array, items: { type: string } }
+        at_most_once: { type: boolean }
+        limits: { type: object, additionalProperties: true }
+        connector: { type: string }
+        entrypoint: { type: string }
+        needs_connection: { type: boolean }
+        approval_policy: { type: object, additionalProperties: true }
+    ActionPage:
+      type: object
+      required: [items]
+      properties: { items: { type: array, items: { $ref: '#/components/schemas/ActionManifest' } } }
+
+    Secret:
+      allOf:
+        - { $ref: '#/components/schemas/Meta' }
+        - type: object
+          required: [name, key_id]
+          properties:
+            name: { type: string }
+            key_id: { type: string, description: master key that wraps this secret's data key }
+            scope: { type: string }
+    SecretPage:
+      type: object
+      required: [items]
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/Secret' } }
+        next_cursor: { type: string }
+    SecretPut:
+      type: object
+      required: [value]
+      additionalProperties: false
+      properties:
+        value: { type: string, minLength: 1, maxLength: 65536, writeOnly: true }
+        scope: { type: string, maxLength: 200 }
+
+    Principal:
+      allOf:
+        - { $ref: '#/components/schemas/Meta' }
+        - type: object
+          required: [type, name, roles, disabled]
+          properties:
+            type: { type: string, enum: [user, api_key, service] }
+            name: { type: string }
+            roles: { type: array, items: { type: string, enum: [admin, engineer, analyst, viewer, service] } }
+            disabled: { type: boolean }
+    PrincipalCreated:
+      allOf:
+        - { $ref: '#/components/schemas/Principal' }
+        - type: object
+          properties:
+            api_key: { type: string, description: 'Shown once. Send as "Authorization: Bearer <api_key>".' }
+    PrincipalCreate:
+      type: object
+      required: [type, name, roles]
+      additionalProperties: false
+      properties:
+        type: { type: string, enum: [user, api_key, service] }
+        name: { type: string, minLength: 1, maxLength: 200 }
+        roles: { type: array, minItems: 1, items: { type: string, enum: [admin, engineer, analyst, viewer, service] } }
+    PrincipalPatch:
+      type: object
+      additionalProperties: false
+      properties:
+        roles: { type: array, minItems: 1, items: { type: string, enum: [admin, engineer, analyst, viewer, service] } }
+        disabled: { type: boolean }
+    PrincipalPage:
+      type: object
+      required: [items]
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/Principal' } }
+        next_cursor: { type: string }
+    RolePage:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            type: object
+            required: [name, permissions]
+            properties: { name: { type: string }, permissions: { type: array, items: { type: string } } }
+    AuditRecord:
+      allOf:
+        - { $ref: '#/components/schemas/Meta' }
+        - type: object
+          required: [actor, actor_type, action, resource]
+          properties:
+            actor: { type: string }
+            actor_type: { type: string }
+            action: { type: string }
+            resource: { type: string }
+            before_hash: { type: string }
+            after_hash: { type: string }
+            ip: { type: string }
+            request_id: { type: string }
+    AuditPage:
+      type: object
+      required: [items]
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/AuditRecord' } }
+        next_cursor: { type: string }
+    Me:
+      type: object
+      required: [id, name, roles, permissions, auth_enabled]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        type: { type: string }
+        roles: { type: array, items: { type: string } }
+        permissions: { type: array, items: { type: string } }
+        auth_enabled: { type: boolean }
+    UIEvent:
+      type: object
+      required: [topic, id, at]
+      properties:
+        topic: { type: string, enum: [executions, cases, approvals, alerts] }
+        id: { type: string }
+        data: { type: object, additionalProperties: true }
+        at: { type: string, format: date-time }
+
+    AlertToCase:
+      type: object
+      additionalProperties: false
+      properties:
+        case_id: { type: string, description: Link to this case; omit to open a new case from the alert }
+        title: { type: string, maxLength: 300 }
+        assignee: { type: string, maxLength: 200 }
+    CaseAlertsLink:
+      type: object
+      required: [alert_ids]
+      additionalProperties: false
+      properties:
+        alert_ids: { type: array, minItems: 1, maxItems: 200, items: { type: string } }
+    CaseAlert:
+      allOf:
+        - { $ref: '#/components/schemas/Meta' }
+        - type: object
+          required: [case_id, alert_id, snapshot, linked_at]
+          properties:
+            case_id: { type: string }
+            alert_id: { type: string }
+            snapshot: { type: object, additionalProperties: true }
+            linked_at: { type: string, format: date-time }
+    CaseAlertPage:
+      type: object
+      required: [items]
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/CaseAlert' } }
+        next_cursor: { type: string }
+    CaseTaskPatch:
+      type: object
+      additionalProperties: false
+      properties:
+        title: { type: string, minLength: 1, maxLength: 300 }
+        description: { type: string }
+        status: { type: string, enum: [open, in_progress, done, cancelled] }
+        assignee: { type: string, maxLength: 200 }
+        due_at: { type: string, format: date-time }
+    Evidence:
+      type: object
+      required: [id, name, ref, sha256, size, added_at]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        ref: { type: string }
+        sha256: { type: string }
+        size: { type: integer }
+        content_type: { type: string }
+        added_by: { type: string }
+        added_at: { type: string, format: date-time }
+    EvidenceLink:
+      type: object
+      required: [url, expires_at, evidence]
+      properties:
+        url: { type: string }
+        expires_at: { type: string, format: date-time }
+        evidence: { $ref: '#/components/schemas/Evidence' }
+    Dashboard:
+      type: object
+      required: [at, alerts_last_24h, alerts_by_severity, open_cases, cases_by_severity, executions_last_24h, pending_approvals]
+      properties:
+        at: { type: string, format: date-time }
+        alerts_last_24h: { type: integer }
+        alerts_by_severity: { type: object, additionalProperties: { type: integer } }
+        open_cases: { type: integer }
+        cases_by_severity: { type: object, additionalProperties: { type: integer } }
+        executions_last_24h: { type: object, additionalProperties: { type: integer } }
+        pending_approvals: { type: integer }
+        mttr_hours: { type: number, description: mean time to resolve cases closed in the last 7 days }
+        automation_rate: { type: number, description: share of the last 24 h's alerts that started a workflow }
+        queues: { type: array, items: { type: object, additionalProperties: true } }
+        sources: { type: array, items: { type: object, additionalProperties: true } }
+        errors: { type: object, additionalProperties: { type: string } }
+    ConnectionTestResult:
+      type: object
+      required: [ok, status, execution_id]
+      properties:
+        ok: { type: boolean }
+        status: { type: string }
+        execution_id: { type: string }
+        output: {}
+        error: { type: string }

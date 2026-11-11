@@ -6,8 +6,10 @@ import (
 	"testing"
 )
 
-var testOpts = Options{Prefix: "soar", StateReplicas: 0, TimeSeriesReplicas: 0,
-	Retention: Retention{Default: "7d", Classes: map[string]string{"cases": "3d", "idempotency": "ttl", "seen": "ttl"}}}
+var testOpts = Options{
+	Prefix: "soar", StateReplicas: 0, TimeSeriesReplicas: 0,
+	Retention: Retention{Default: "7d", Classes: map[string]string{"cases": "3d", "idempotency": "ttl", "seen": "ttl"}},
+}
 
 // Every JSON field of every domain type must exist in the strict mapping,
 // otherwise OpenSearch would reject real documents at runtime.
@@ -34,7 +36,7 @@ func jsonName(f reflect.StructField) (string, bool) {
 
 func checkType(t *testing.T, path string, typ reflect.Type, props Props) {
 	t.Helper()
-	for typ.Kind() == reflect.Ptr || typ.Kind() == reflect.Slice {
+	for typ.Kind() == reflect.Pointer || typ.Kind() == reflect.Slice {
 		typ = typ.Elem()
 	}
 	if typ.Kind() != reflect.Struct {
@@ -67,8 +69,8 @@ func TestBuildAll(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(plans) != 22 {
-		t.Fatalf("want 22 entities from spec section 5, got %d", len(plans))
+	if len(plans) != 23 {
+		t.Fatalf("want 23 entities (22 from spec section 5 plus approvals), got %d", len(plans))
 	}
 	seen := map[string]bool{}
 	for _, p := range plans {
@@ -144,5 +146,24 @@ func TestShippedRetentionFile(t *testing.T) {
 	}
 	if _, err := BuildAll(Options{Prefix: "soar", Retention: r}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// The duplicate-guard and idempotency indices are written constantly and only ever read by ID
+// (real-time GET), so a slow refresh saves OpenSearch a lot of segment churn.
+func TestHighChurnIndicesRefreshSlowly(t *testing.T) {
+	plans, _ := BuildAll(testOpts)
+	for _, p := range plans {
+		idx := p.Template["template"].(map[string]any)["settings"].(map[string]any)["index"].(map[string]any)
+		want := "1s"
+		switch p.Entity.Name {
+		case "seen", "idempotency":
+			want = "30s"
+		case "alerts", "raw", "steprun", "timeline", "audit":
+			want = "5s"
+		}
+		if idx["refresh_interval"] != want {
+			t.Errorf("%s: refresh_interval %v, want %s", p.Entity.Name, idx["refresh_interval"], want)
+		}
 	}
 }

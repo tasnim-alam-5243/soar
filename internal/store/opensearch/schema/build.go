@@ -51,21 +51,28 @@ func Build(e Entity, o Options) (Plan, error) {
 
 	settings := map[string]any{}
 	dynamic := map[string]any{}
+	refresh := e.Refresh
 	switch e.Kind {
 	case State:
-		settings["index"] = map[string]any{"number_of_shards": 1, "number_of_replicas": o.StateReplicas, "refresh_interval": "1s"}
-		dynamic = map[string]any{"index": map[string]any{"number_of_replicas": o.StateReplicas, "refresh_interval": "1s"}}
+		if refresh == "" {
+			refresh = "1s"
+		}
+		settings["index"] = map[string]any{"number_of_shards": 1, "number_of_replicas": o.StateReplicas, "refresh_interval": refresh}
+		dynamic = map[string]any{"index": map[string]any{"number_of_replicas": o.StateReplicas, "refresh_interval": refresh}}
 	case TimeSeries:
 		shards := e.Shards
 		if shards < 1 {
 			shards = 1
 		}
+		if refresh == "" {
+			refresh = "5s"
+		}
 		settings["index"] = map[string]any{
 			"number_of_shards": shards, "number_of_replicas": o.TimeSeriesReplicas,
-			"refresh_interval": "5s", "codec": "best_compression",
+			"refresh_interval": refresh, "codec": "best_compression",
 		}
 		settings["plugins.index_state_management.rollover_alias"] = alias
-		dynamic = map[string]any{"index": map[string]any{"number_of_replicas": o.TimeSeriesReplicas, "refresh_interval": "5s"}}
+		dynamic = map[string]any{"index": map[string]any{"number_of_replicas": o.TimeSeriesReplicas, "refresh_interval": refresh}}
 	}
 
 	p := Plan{

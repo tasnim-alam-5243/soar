@@ -18,6 +18,7 @@ type Entity struct {
 	Kind           Kind
 	RetentionClass string // key in retention.yaml; "" = not subject to retention
 	Shards         int    // primary shards (time-series; state indices always use 1)
+	Refresh        string // refresh_interval override; "" = 1s for state, 5s for time-series
 	Props          Props  // entity-specific fields (common fields are added automatically)
 	Model          any    // zero value of the domain type, used by the drift test
 }
@@ -31,24 +32,35 @@ func Entities() []Entity {
 		{Name: "workflows", Kind: State, Model: domain.Workflow{}, Props: Props{
 			"name": textKW(), "description": text(), "version": integer(), "status": kw(),
 			"definition": blob(),
-			"triggers":   obj(Props{"type": kw(), "kind": kw(), "match": stored()}),
+			"triggers":   obj(Props{"type": kw(), "kind": kw(), "match": stored(), "cron": stored()}),
 			"checksum":   kw(), "created_by": kw(),
 		}},
 		{Name: "executions", Kind: State, RetentionClass: "executions", Model: domain.Execution{}, Props: Props{
-			"workflow_id": kw(), "workflow_version": integer(), "status": kw(),
-			"trigger": obj(Props{"type": kw(), "kind": kw(), "alert_id": kw(), "event_id": kw(), "user": kw()}),
+			"workflow_id": kw(), "workflow_name": kw(), "workflow_version": integer(), "workflow_checksum": kw(), "status": kw(),
+			"trigger": obj(Props{
+				"type": kw(), "kind": kw(), "alert_id": kw(), "event_id": kw(), "user": kw(),
+				"parent_execution_id": kw(), "parent_node_id": kw(), "retry_of": kw(), "scheduled_for": date(),
+			}),
 			"context": blob(), "pending_nodes": kw(),
 			"outbox": nested(Props{
-				"key": kw(), "subject": kw(), "payload_ref": kw(),
+				"key": kw(), "kind": kw(), "subject": kw(), "payload": blob(), "payload_ref": kw(),
 				"published": boolean(), "created_at": date(), "published_at": date(),
 			}),
-			"lease":      obj(Props{"owner": kw(), "expires_at": date()}),
-			"partition":  integer(),
-			"error":      text(),
-			"started_at": date(), "ended_at": date(), "deadline_at": date(),
+			"outbox_pending": boolean(),
+			"lease":          obj(Props{"owner": kw(), "expires_at": date()}),
+			"partition":      integer(),
+			"dry_run":        boolean(),
+			"error":          text(),
+			"started_at":     date(), "ended_at": date(), "deadline_at": date(),
+		}},
+		{Name: "approvals", Kind: State, RetentionClass: "executions", Model: domain.Approval{}, Props: Props{
+			"execution_id": kw(), "node_id": kw(), "workflow_id": kw(), "workflow_name": kw(), "partition": integer(),
+			"approvers": kw(), "message": text(), "action": kw(), "command": blob(), "risk": kw(), "status": kw(),
+			"decided_by": kw(), "decided_at": date(), "comment": text(), "due_at": date(),
 		}},
 		{Name: "steprun", Kind: TimeSeries, RetentionClass: "steprun", Shards: 1, Model: domain.StepRun{}, Props: Props{
-			"execution_id": kw(), "node_id": kw(), "action": kw(), "attempt": integer(), "status": kw(),
+			"execution_id": kw(), "workflow_id": kw(), "node_id": kw(), "action": kw(), "attempt": integer(), "item": integer(), "status": kw(),
+			"input": blob(), "output": blob(), "dry_run": boolean(),
 			"input_ref": kw(), "output_ref": kw(),
 			"error":       obj(Props{"code": kw(), "message": text(), "retryable": boolean()}),
 			"duration_ms": long(), "idempotency_key": kw(), "parent_step_id": kw(), "actor_type": kw(),
@@ -76,6 +88,7 @@ func Entities() []Entity {
 				"system": kw(), "id": kw(), "url": stored(), "last_synced_at": date(), "sync_version": long(),
 			}),
 			"closed_at": date(),
+			"evidence":  obj(Props{"id": kw(), "name": kw(), "ref": kw(), "sha256": kw(), "size": long(), "content_type": kw(), "added_by": kw(), "added_at": date()}),
 		}},
 		{Name: "case-tasks", Kind: State, RetentionClass: "case_evidence", Model: domain.CaseTask{}, Props: Props{
 			"case_id": kw(), "title": textKW(), "description": text(), "status": kw(),
@@ -94,16 +107,17 @@ func Entities() []Entity {
 			"before_hash": kw(), "after_hash": kw(), "ip": ipAddr(), "request_id": kw(),
 		}},
 		{Name: "secrets", Kind: State, Model: domain.Secret{}, Props: Props{
-			"name": kw(), "ciphertext": binary(), "key_id": kw(), "nonce": binary(), "scope": kw(),
+			"name": kw(), "ciphertext": binary(), "key_id": kw(), "wrapped_key": binary(), "nonce": binary(), "scope": kw(),
 		}},
 		{Name: "principals", Kind: State, Model: domain.Principal{}, Props: Props{
 			"type": kw(), "name": kw(), "roles": kw(), "key_hash": kw(), "disabled": boolean(),
 		}},
-		{Name: "idempotency", Kind: State, RetentionClass: "idempotency", Model: domain.Idempotency{}, Props: Props{
-			"key": kw(), "status": kw(), "result_ref": kw(), "expires_at": date(),
+		{Name: "idempotency", Kind: State, Refresh: "30s", RetentionClass: "idempotency", Model: domain.Idempotency{}, Props: Props{
+			"key": kw(), "status": kw(), "result_ref": kw(), "result": blob(), "expires_at": date(),
 		}},
 		{Name: "timers", Kind: State, Model: domain.Timer{}, Props: Props{
 			"execution_id": kw(), "node_id": kw(), "due_at": date(), "kind": kw(),
+			"attempt": integer(), "item": integer(), "partition": integer(),
 			"fired": boolean(), "fired_at": date(),
 		}},
 		{Name: "sources", Kind: State, Model: domain.Source{}, Props: Props{
@@ -126,7 +140,7 @@ func Entities() []Entity {
 			"name": kw(), "items": kw(),
 		}},
 		{Name: "cursors", Kind: State, Model: domain.Cursor{}, Props: Props{
-			"source_id": kw(), "cursor": stored(),
+			"source_id": kw(), "cursor": stored(), "lease_owner": kw(), "lease_expires_at": date(),
 		}},
 		{Name: "raw", Kind: TimeSeries, RetentionClass: "raw", Shards: 1, Model: domain.RawRecord{}, Props: Props{
 			"source_id": kw(), "transport": kw(), "received_at": date(),
@@ -136,8 +150,8 @@ func Entities() []Entity {
 		{Name: "case-alerts", Kind: State, RetentionClass: "case_evidence", Model: domain.CaseAlert{}, Props: Props{
 			"case_id": kw(), "alert_id": kw(), "snapshot": blob(), "linked_at": date(),
 		}},
-		{Name: "seen", Kind: State, RetentionClass: "seen", Model: domain.Seen{}, Props: Props{
-			"key": kw(), "first_seen": date(),
+		{Name: "seen", Kind: State, Refresh: "30s", RetentionClass: "seen", Model: domain.Seen{}, Props: Props{
+			"key": kw(), "event_id": kw(), "first_seen": date(), "applied": boolean(),
 		}},
 		{Name: "connections", Kind: State, Model: domain.Connection{}, Props: Props{
 			"connector_id": kw(), "name": kw(), "auth_type": kw(),

@@ -4,3 +4,11 @@ bin/
 coverage.out
 web/node_modules/
 web/dist/
+runner/python/.venv/
+**/__pycache__/
+.pytest_cache/
+*.tsbuildinfo
+# binaries from `go build ./cmd/<name>` run in the repository root
+/soar
+/loadgen
+/stepcheck

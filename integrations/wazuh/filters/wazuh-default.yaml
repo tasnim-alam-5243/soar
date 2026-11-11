@@ -1,0 +1,25 @@
+# Default Wazuh filter set. Keep the Wazuh Integrator filter coarse (changing it needs a
+# manager restart) and do the fine filtering here, where changes apply immediately.
+id: wazuh-default
+version: 1
+mode: first_match
+default: keep
+rules:
+  - name: drop-noisy-rule-ids        # edit the list with PUT /api/v1/lists/wazuh_noisy_rule_ids
+    stage: pre_map
+    action: drop
+    when: 'in_list(get_path(raw, "rule.id"), "wazuh_noisy_rule_ids")'
+  - name: drop-ignored-decoders
+    stage: pre_map
+    action: drop
+    when: 'in_list(get_path(raw, "decoder.name"), "ignored_decoders")'
+  - name: ransomware-or-bruteforce   # tagged and always kept, even below the minimum level
+    stage: pre_map
+    action: tag
+    tag: priority-pattern
+    when: 'string(coalesce(get_path(raw, "rule.description"), "")).matches("(?i)ransom|brute.?force")'
+  # Script rules (for logic CEL cannot express) need the Python runner from Step 7.
+  - name: min-level                  # level 3 and 5 alerts matter (rule 5715 is level 3), so the floor is 3
+    stage: pre_map
+    action: drop
+    when: 'int(get_path(raw, "rule.level")) < 3'

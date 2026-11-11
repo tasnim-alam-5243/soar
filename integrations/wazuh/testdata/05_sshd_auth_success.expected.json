@@ -1,0 +1,60 @@
+{
+  "dedup_window_sec": 600,
+  "description": "Oct 29 12:51:41 web01 sshd[2211]: Accepted password for root from 10.10.192.1 port 51234 ssh2",
+  "entities": {
+    "hosts": [
+      "web01"
+    ],
+    "users": [
+      "root"
+    ]
+  },
+  "external_id": "1793256701.12020",
+  "fingerprint": "dd92335283eb2387b25126aa82f9b0de384ea3f08308a1e8c1c0db23371ec898",
+  "kind": "alert",
+  "mitre": {
+    "tactics": [
+      "Defense Evasion",
+      "Persistence",
+      "Privilege Escalation",
+      "Initial Access",
+      "Lateral Movement"
+    ],
+    "technique_ids": [
+      "T1078",
+      "T1021"
+    ],
+    "techniques": [
+      "Valid Accounts",
+      "Remote Services"
+    ]
+  },
+  "observables": [
+    {
+      "type": "host",
+      "value": "web01"
+    },
+    {
+      "role": "source",
+      "type": "ip",
+      "value": "10.10.192.1"
+    },
+    {
+      "role": "target",
+      "type": "user",
+      "value": "root"
+    }
+  ],
+  "occurred_at": "2026-10-29T06:51:41.200Z",
+  "original_severity": "3",
+  "route": "",
+  "severity": 1,
+  "source_id": "wazuh-prod",
+  "system": "wazuh-prod",
+  "tags": [
+    "syslog",
+    "sshd",
+    "authentication_success"
+  ],
+  "title": "sshd: authentication success."
+}

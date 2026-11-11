@@ -173,8 +173,10 @@ func (r *Runner) applyOne(ctx context.Context, p schema.Plan) (string, error) {
 	}
 
 	// 4. Record in the ledger last: a crash before this line just means the next run repeats the (idempotent) steps.
-	doc := ledgerDoc{Entity: p.Entity.Name, Checksum: p.Checksum, SchemaVersion: schema.Version, Action: action,
-		AppliedAt: time.Now().UTC().Format(time.RFC3339)}
+	doc := ledgerDoc{
+		Entity: p.Entity.Name, Checksum: p.Checksum, SchemaVersion: schema.Version, Action: action,
+		AppliedAt: time.Now().UTC().Format(time.RFC3339),
+	}
 	_, _, err = r.C.Do(ctx, http.MethodPut, "/"+r.ledgerAlias()+"/_doc/"+p.Entity.Name+"?refresh=true", doc)
 	return action, err
 }

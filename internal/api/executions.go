@@ -5,8 +5,10 @@ import (
 )
 
 func (s *Server) listExecutions(w http.ResponseWriter, r *http.Request) error {
-	q, v, err := listQuery(r, sortSpec{fields: map[string]string{"created_at": "created_at", "started_at": "started_at", "ended_at": "ended_at"},
-		defaultName: "created_at", defaultDesc: true}, "workflow_id", "status", "alert_id")
+	q, v, err := listQuery(r, sortSpec{
+		fields:      map[string]string{"created_at": "created_at", "started_at": "started_at", "ended_at": "ended_at"},
+		defaultName: "created_at", defaultDesc: true,
+	}, "workflow_id", "status", "alert_id")
 	if err != nil {
 		return err
 	}

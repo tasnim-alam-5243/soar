@@ -13,23 +13,51 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/yourorg/soar/integrations"
+	"github.com/yourorg/soar/internal/actions"
+	"github.com/yourorg/soar/internal/blob"
 	"github.com/yourorg/soar/internal/domain"
+	"github.com/yourorg/soar/internal/ingest/pack"
 	"github.com/yourorg/soar/internal/obs"
+	"github.com/yourorg/soar/internal/queue"
+	"github.com/yourorg/soar/internal/security"
 	"github.com/yourorg/soar/internal/store"
 	"github.com/yourorg/soar/internal/store/memory"
 )
 
-func newTestServer(t *testing.T, st *store.Store) *httptest.Server {
+func newTestServer(t *testing.T, st *store.Store, q ...QueueOps) *httptest.Server {
+	t.Helper()
+	srv, _ := newTestServerS(t, st, q...)
+	return srv
+}
+
+func newTestServerS(t *testing.T, st *store.Store, q ...QueueOps) (*httptest.Server, *Server) {
 	t.Helper()
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	mux := http.NewServeMux()
-	New(st, log).Mount(mux)
+	s := New(st, log)
+	reg, err := actions.Build(actions.Deps{Store: st, Log: log}, integrations.Packs, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.reg = reg
+	if len(q) > 0 {
+		s.WithQueue(q[0])
+		if p, ok := q[0].(Publisher); ok {
+			s.WithEngine(reg, p, 8)
+		}
+	}
+	keys, _ := security.NewKeyring("k1", make([]byte, 32), nil)
+	s.WithSecrets(&security.SecretStore{Repo: st.Secrets, Keys: keys})
+	s.WithBlob(blob.NewMemory())
+	s.Mount(mux)
 	srv := httptest.NewServer(obs.Middleware(log, mux))
 	t.Cleanup(srv.Close)
-	return srv
+	return srv, s
 }
 
 // harness sends requests and checks every response against openapi.yaml.
@@ -43,6 +71,8 @@ type harness struct {
 type reqOpt struct {
 	headers map[string]string
 	loose   bool // do not validate the request against the spec (negative tests)
+	raw     []byte
+	ctype   string
 }
 
 func (h *harness) do(method, path string, body any, want int, opts ...reqOpt) (map[string]any, http.Header) {
@@ -88,8 +118,14 @@ func (h *harness) do(method, path string, body any, want int, opts ...reqOpt) (m
 		b, _ := json.Marshal(body)
 		rd = bytes.NewReader(b)
 	}
+	if o.raw != nil {
+		rd = bytes.NewReader(o.raw)
+	}
 	req, _ := http.NewRequestWithContext(context.Background(), method, h.url+Prefix+path, rd)
-	if body != nil {
+	switch {
+	case o.raw != nil:
+		req.Header.Set("Content-Type", o.ctype)
+	case body != nil:
 		req.Header.Set("Content-Type", "application/json")
 	}
 	for k, v := range o.headers {
@@ -177,9 +213,9 @@ func contains(list []string, s string) bool {
 
 var goodDef = map[string]any{
 	"nodes": []any{
-		map[string]any{"id": "check", "action": "http.request"},
-		map[string]any{"id": "decide", "type": "branch", "cases": []any{map[string]any{"when": "x > 1", "next": []any{"block"}}}, "default": []any{"close"}},
-		map[string]any{"id": "block", "action": "connector.firewall.block_url"},
+		map[string]any{"id": "check", "action": "http.request", "params": map[string]any{"url": "\"https://intel.example/u\""}},
+		map[string]any{"id": "decide", "type": "branch", "cases": []any{map[string]any{"when": "inputs.x > 1", "next": []any{"block"}}}, "default": []any{"close"}},
+		map[string]any{"id": "block", "action": "notify.log", "params": map[string]any{"message": "blocked"}},
 		map[string]any{"id": "close", "action": "case.close"},
 	},
 	"edges": []any{"check -> decide"},
@@ -191,7 +227,16 @@ func TestContract(t *testing.T) {
 		t.Fatal(err)
 	}
 	st := memory.NewStore("soar")
-	srv := newTestServer(t, st)
+	bundle, err := pack.Load(integrations.Packs, "wazuh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pack.Install(context.Background(), st, bundle); err != nil {
+		t.Fatal(err)
+	}
+	fq := &fakeQueue{}
+	srv, srvS := newTestServerS(t, st, fq)
+	srvS.testWait = 100 * time.Millisecond
 	h := &harness{t: t, sp: sp, url: srv.URL, hit: map[string]bool{}}
 	ctx := context.Background()
 
@@ -225,8 +270,10 @@ func TestContract(t *testing.T) {
 		h.do("POST", "/workflows", map[string]any{"name": "x", "definition": goodDef, "bogus": 1}, 400, reqOpt{loose: true})
 		h.do("POST", "/workflows", map[string]any{"name": "x", "definition": goodDef}, 400, reqOpt{headers: map[string]string{"Idempotency-Key": "bad key!"}})
 
-		body := map[string]any{"name": "phishing_triage", "description": "d", "definition": goodDef,
-			"triggers": []any{map[string]any{"type": "alert", "match": `alert.severity >= 3`}}}
+		body := map[string]any{
+			"name": "phishing_triage", "description": "d", "definition": goodDef,
+			"triggers": []any{map[string]any{"type": "alert", "match": `alert.severity >= 3`}},
+		}
 		created, hdr := h.do("POST", "/workflows", body, 201, reqOpt{headers: map[string]string{"Idempotency-Key": "wf-1"}})
 		id := sa(created, "id")
 		if created["version"] != float64(1) || created["status"] != "draft" || hdr.Get("Location") != Prefix+"/workflows/"+id {
@@ -299,17 +346,34 @@ func TestContract(t *testing.T) {
 		}
 		h.do("POST", "/workflows/wf_missing/versions", map[string]any{}, 404)
 
-		run, _ := h.do("POST", "/workflows/"+id+"/run", nil, 501)
-		if !strings.HasSuffix(sa(run, "type"), "not-implemented") {
-			t.Errorf("run: %v", run)
+		// running: published versions run, drafts only as a dry run
+		run, rh := h.do("POST", "/workflows/"+id+"/run", map[string]any{"inputs": map[string]any{"x": 2}}, 202, reqOpt{headers: map[string]string{"Idempotency-Key": "run-1"}})
+		if run["status"] != "queued" || run["workflow_name"] != "phishing_triage" || rh.Get("Location") != Prefix+"/executions/"+sa(run, "id") {
+			t.Fatalf("run: %v %v", run, rh)
 		}
+		if m := fq.last(); m.Subject != "results."+strconv.Itoa(int(run["partition"].(float64))) || !strings.HasPrefix(m.ID, "start:") {
+			t.Errorf("start message: %+v", m)
+		}
+		again, _ = h.do("POST", "/workflows/"+id+"/run", map[string]any{"inputs": map[string]any{"x": 2}}, 202, reqOpt{headers: map[string]string{"Idempotency-Key": "run-1"}})
+		if sa(again, "id") != sa(run, "id") {
+			t.Error("run with the same Idempotency-Key must not start a second execution")
+		}
+		h.do("POST", "/workflows/"+id+"/run", nil, 202) // empty body: no inputs
+		h.do("POST", "/workflows/"+sa(v2, "id")+"/run", nil, 409)
+		h.do("POST", "/workflows/"+sa(v2, "id")+"/run", map[string]any{"dry_run": true}, 202)
+		h.do("POST", "/workflows/"+id+"/run", map[string]any{"alert_id": "alt_missing"}, 422)
+		h.do("POST", "/workflows/"+id+"/run", map[string]any{"bogus": true}, 400, reqOpt{loose: true})
+		h.do("POST", "/workflows/wf_missing/run", nil, 404)
+		h.do("POST", "/workflows/"+sa(bad, "id")+"/run", map[string]any{"dry_run": true}, 422)
 	})
 
 	t.Run("executions", func(t *testing.T) {
 		h.t = t
 		now := time.Now().UTC()
-		ex := domain.Execution{Meta: domain.NewMeta(domain.PrefixExecution), WorkflowID: "wf_1", WorkflowVersion: 1, Status: "running",
-			Trigger: domain.ExecutionTrigger{Type: "alert", AlertID: "alt_9"}, StartedAt: &now, Partition: 3}
+		ex := domain.Execution{
+			Meta: domain.NewMeta(domain.PrefixExecution), WorkflowID: "wf_1", WorkflowVersion: 1, Status: "running",
+			Trigger: domain.ExecutionTrigger{Type: "alert", AlertID: "alt_9"}, StartedAt: &now, Partition: 3,
+		}
 		other := domain.Execution{Meta: domain.NewMeta(domain.PrefixExecution), WorkflowID: "wf_2", WorkflowVersion: 1, Status: "succeeded", Trigger: domain.ExecutionTrigger{Type: "manual"}}
 		for _, e := range []domain.Execution{ex, other} {
 			if _, err := st.Executions.Create(ctx, e); err != nil {
@@ -327,7 +391,7 @@ func TestContract(t *testing.T) {
 		if len(page["items"].([]any)) != 1 {
 			t.Errorf("filters: %v", page)
 		}
-		all, _ := h.do("GET", "/executions?sort=-started_at", nil, 200)
+		all, _ := h.do("GET", "/executions?workflow_id=wf_1,wf_2&sort=-started_at", nil, 200)
 		if len(all["items"].([]any)) != 2 {
 			t.Errorf("all: %v", all)
 		}
@@ -346,7 +410,172 @@ func TestContract(t *testing.T) {
 			t.Errorf("steps page 2: %v", rest)
 		}
 		h.do("GET", "/executions/exe_missing/steps", nil, 404)
-		h.do("POST", "/executions/"+ex.ID+"/cancel", nil, 501)
+		cx, _ := h.do("POST", "/executions/"+ex.ID+"/cancel", map[string]any{"reason": "false positive"}, 202)
+		if sa(cx, "id") != ex.ID || !strings.HasPrefix(fq.last().ID, "cancel:") {
+			t.Errorf("cancel: %v %+v", cx, fq.last())
+		}
+		h.do("POST", "/executions/"+other.ID+"/cancel", nil, 409)
+		h.do("POST", "/executions/exe_missing/cancel", nil, 404)
+		h.do("POST", "/executions/"+ex.ID+"/retry", nil, 409) // still running
+
+		// retry of a failed execution starts a new one with the same inputs
+		wfs, _ := h.do("GET", "/workflows?name=phishing_triage&status=published", nil, 200)
+		pubID := sa(wfs["items"].([]any)[0].(map[string]any), "id")
+		failed := domain.Execution{
+			Meta: domain.NewMeta(domain.PrefixExecution), WorkflowID: pubID, WorkflowVersion: 1, Status: "failed",
+			Trigger: domain.ExecutionTrigger{Type: "manual"}, Context: map[string]any{"status": "failed", "inputs": map[string]any{"x": 5}},
+		}
+		if _, err := st.Executions.Create(ctx, failed); err != nil {
+			t.Fatal(err)
+		}
+		re, _ := h.do("POST", "/executions/"+failed.ID+"/retry", nil, 202)
+		if re["trigger"].(map[string]any)["retry_of"] != failed.ID || re["status"] != "queued" {
+			t.Errorf("retry: %v", re)
+		}
+		h.do("POST", "/executions/exe_missing/retry", nil, 404)
+	})
+
+	t.Run("approvals", func(t *testing.T) {
+		h.t = t
+		exe := domain.Execution{
+			Meta: domain.NewMeta(domain.PrefixExecution), WorkflowID: "wf_1", WorkflowVersion: 1, Status: "waiting", Partition: 2,
+			Trigger: domain.ExecutionTrigger{Type: "manual"},
+		}
+		if _, err := st.Executions.Create(ctx, exe); err != nil {
+			t.Fatal(err)
+		}
+		ap := domain.Approval{
+			Meta: domain.Meta{ID: "apr_1"}, ExecutionID: exe.ID, NodeID: "ask", Approvers: []string{"analyst"},
+			Message: "delete 3 emails?", Status: "pending", DueAt: time.Now().Add(time.Hour), Partition: 2,
+		}
+		if _, err := st.Approvals.Create(ctx, ap); err != nil {
+			t.Fatal(err)
+		}
+		list, _ := h.do("GET", "/approvals?status=pending&sort=due_at", nil, 200)
+		if len(list["items"].([]any)) != 1 {
+			t.Fatalf("approvals: %v", list)
+		}
+		h.do("GET", "/approvals/apr_1", nil, 200)
+		h.do("GET", "/approvals/apr_missing", nil, 404)
+		h.do("POST", "/approvals/apr_1/decision", map[string]any{"comment": "no verdict"}, 422, reqOpt{loose: true})
+		dec, _ := h.do("POST", "/approvals/apr_1/decision", map[string]any{"approved": true, "comment": "ok"}, 200)
+		if dec["status"] != "approved" || dec["decided_by"] != "dev" {
+			t.Errorf("decision: %v", dec)
+		}
+		if m := fq.last(); m.Subject != "results.2" || m.ID != "approval:apr_1" {
+			t.Errorf("approval message: %+v", m)
+		}
+		h.do("POST", "/approvals/apr_1/decision", map[string]any{"approved": false}, 409)
+		h.do("POST", "/approvals/apr_missing/decision", map[string]any{"approved": false}, 404)
+	})
+
+	t.Run("connectors_and_secrets", func(t *testing.T) {
+		h.t = t
+		cs, _ := h.do("GET", "/connectors", nil, 200)
+		ids := map[string]bool{}
+		for _, c := range cs["items"].([]any) {
+			ids[sa(c.(map[string]any), "id")] = true
+		}
+		if !ids["builtin"] || !ids["wazuh"] {
+			t.Errorf("connectors: %v", ids)
+		}
+		acts, _ := h.do("GET", "/connectors/builtin/actions", nil, 200)
+		if len(acts["items"].([]any)) < 8 {
+			t.Errorf("builtin actions: %v", acts)
+		}
+		h.do("GET", "/connectors/wazuh/actions", nil, 200)
+		h.do("GET", "/connectors/nope/actions", nil, 404)
+
+		sec, _ := h.do("PUT", "/secrets/vt_api_key", map[string]any{"value": "super-secret-value", "scope": "virustotal"}, 200)
+		if sec["name"] != "vt_api_key" || sec["ciphertext"] != nil || sec["key_id"] != "k1" {
+			t.Errorf("secret metadata: %v", sec)
+		}
+		h.do("PUT", "/secrets/9bad", map[string]any{"value": "x"}, 422)
+		h.do("PUT", "/secrets/x", map[string]any{"value": ""}, 422, reqOpt{loose: true})
+		list, _ := h.do("GET", "/secrets?sort=name", nil, 200)
+		raw, _ := json.Marshal(list)
+		if strings.Contains(string(raw), "super-secret-value") || strings.Contains(string(raw), "ciphertext") {
+			t.Errorf("secret material leaked: %s", raw)
+		}
+		h.do("DELETE", "/secrets/vt_api_key", nil, 204)
+		h.do("DELETE", "/secrets/vt_api_key", nil, 404)
+	})
+
+	t.Run("principals_roles_audit_me", func(t *testing.T) {
+		h.t = t
+		me, _ := h.do("GET", "/me", nil, 200)
+		if me["name"] != "dev" || me["auth_enabled"] != false {
+			t.Errorf("me: %v", me)
+		}
+		pk, phdr := h.do("POST", "/principals", map[string]any{"type": "api_key", "name": "ci-bot", "roles": []any{"service"}}, 201)
+		if !strings.HasPrefix(sa(pk, "api_key"), "soar_") || pk["key_hash"] != nil || phdr.Get("Location") == "" {
+			t.Fatalf("principal: %v", pk)
+		}
+		h.do("POST", "/principals", map[string]any{"type": "api_key", "name": "ci-bot", "roles": []any{"service"}}, 409)
+		h.do("POST", "/principals", map[string]any{"type": "robot", "name": "x", "roles": []any{"god"}}, 422, reqOpt{loose: true})
+		pid := sa(pk, "id")
+		got, _ := h.do("GET", "/principals/"+pid, nil, 200)
+		if got["api_key"] != nil || got["key_hash"] != nil {
+			t.Errorf("key material must never be returned again: %v", got)
+		}
+		h.do("GET", "/principals?type=api_key&sort=name", nil, 200)
+		up, _ := h.do("PATCH", "/principals/"+pid, map[string]any{"disabled": true, "roles": []any{"viewer"}}, 200)
+		if up["disabled"] != true {
+			t.Errorf("patch: %v", up)
+		}
+		h.do("PATCH", "/principals/"+pid, map[string]any{"roles": []any{}}, 422, reqOpt{loose: true})
+		h.do("PATCH", "/principals/prn_missing", map[string]any{"disabled": true}, 404)
+		h.do("GET", "/principals/prn_missing", nil, 404)
+		h.do("DELETE", "/principals/"+pid, nil, 204)
+		h.do("DELETE", "/principals/"+pid, nil, 404)
+		roles, _ := h.do("GET", "/roles", nil, 200)
+		if len(roles["items"].([]any)) != 5 {
+			t.Errorf("roles: %v", roles)
+		}
+		aud, _ := h.do("GET", "/audit?action=principal.create&sort=-created_at", nil, 200)
+		if len(aud["items"].([]any)) != 1 || aud["items"].([]any)[0].(map[string]any)["actor"] != "dev" {
+			t.Errorf("audit: %v", aud)
+		}
+		h.do("GET", "/audit?from=yesterday", nil, 400)
+	})
+
+	t.Run("dashboard", func(t *testing.T) {
+		h.t = t
+		d, _ := h.do("GET", "/dashboard", nil, 200)
+		if _, ok := d["executions_last_24h"].(map[string]any)["queued"]; !ok || len(d["queues"].([]any)) != 2 || len(d["alerts_by_severity"].(map[string]any)) != 5 {
+			t.Errorf("dashboard: %v", d)
+		}
+	})
+
+	t.Run("stream", func(t *testing.T) {
+		h.t = t
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		req, _ := http.NewRequestWithContext(ctx, "GET", srv.URL+Prefix+"/stream?topics=executions", nil)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != 200 || resp.Header.Get("Content-Type") != "text/event-stream" {
+			t.Fatalf("stream: %d %s", resp.StatusCode, resp.Header.Get("Content-Type"))
+		}
+		buf := make([]byte, 64)
+		_, _ = resp.Body.Read(buf) // the "connected" preamble arrives before any event
+		srvS.Events().Publish(UIEvent{Topic: "cases", ID: "cas_x", At: time.Now()})
+		srvS.Events().Publish(UIEvent{Topic: "executions", ID: "exe_42", At: time.Now()})
+		got := ""
+		for !strings.Contains(got, "exe_42") {
+			n, err := resp.Body.Read(buf)
+			if err != nil {
+				t.Fatalf("no event: %v (got %q)", err, got)
+			}
+			got += string(buf[:n])
+		}
+		if strings.Contains(got, "cas_x") {
+			t.Error("topic filter ignored")
+		}
+		h.hit["streamEvents"] = true
 	})
 
 	t.Run("alerts", func(t *testing.T) {
@@ -356,9 +585,11 @@ func TestContract(t *testing.T) {
 		h.do("POST", "/alerts", map[string]any{"title": "x", "severity": 3, "observables": []any{map[string]any{"type": "carrier-pigeon", "value": "x"}}}, 422, reqOpt{loose: true})
 		var ids []string
 		for i, sev := range []int{2, 4, 5} {
-			a, hdr := h.do("POST", "/alerts", map[string]any{"title": "alert " + strconv.Itoa(i), "severity": sev, "tags": []any{"t"},
+			a, hdr := h.do("POST", "/alerts", map[string]any{
+				"title": "alert " + strconv.Itoa(i), "severity": sev, "tags": []any{"t"},
 				"observables": []any{map[string]any{"type": "ip", "value": "10.0.0." + strconv.Itoa(i), "role": "source"}},
-				"ext":         map[string]any{"rule": map[string]any{"id": "5715"}}}, 201)
+				"ext":         map[string]any{"rule": map[string]any{"id": "5715"}},
+			}, 201)
 			ids = append(ids, sa(a, "id"))
 			if a["occurrence_count"] != float64(1) || a["source_id"] != "manual" || hdr.Get("Location") == "" {
 				t.Errorf("created alert: %v", a)
@@ -468,6 +699,85 @@ func TestContract(t *testing.T) {
 		h.do("GET", "/cases/cas_missing/timeline", nil, 404)
 	})
 
+	t.Run("case_alerts_tasks_evidence", func(t *testing.T) {
+		h.t = t
+		now := time.Now().UTC()
+		var ids []string
+		for i := 0; i < 2; i++ {
+			a := domain.Alert{
+				Meta: domain.NewMeta(domain.PrefixAlert), Kind: "alert", SourceID: "wazuh-prod", Title: "SSH login " + strconv.Itoa(i),
+				Severity: 3, ReceivedAt: now, Observables: []domain.Observable{{Type: "ip", Value: "10.10.192." + strconv.Itoa(i)}},
+			}
+			if _, err := st.Alerts.Create(ctx, a); err != nil {
+				t.Fatal(err)
+			}
+			ids = append(ids, a.ID)
+		}
+		// open a case from an alert: 201, observables follow; again: 200, same case
+		c1, hdr := h.do("POST", "/alerts/"+ids[0]+"/case", nil, 201)
+		caseID := sa(c1, "id")
+		if hdr.Get("Location") != Prefix+"/cases/"+caseID || c1["title"] != "SSH login 0" || len(c1["alert_ids"].([]any)) != 1 {
+			t.Fatalf("alert to case: %v", c1)
+		}
+		again, _ := h.do("POST", "/alerts/"+ids[0]+"/case", map[string]any{}, 200)
+		if sa(again, "id") != caseID {
+			t.Error("a second request must reuse the case opened from the alert")
+		}
+		h.do("POST", "/alerts/"+ids[1]+"/case", map[string]any{"case_id": "cas_missing"}, 422)
+		h.do("POST", "/alerts/alt_missing/case", nil, 404)
+		linked, _ := h.do("POST", "/cases/"+caseID+"/alerts", map[string]any{"alert_ids": ids}, 200)
+		if len(linked["alert_ids"].([]any)) != 2 {
+			t.Errorf("link: %v", linked)
+		}
+		h.do("POST", "/cases/"+caseID+"/alerts", map[string]any{"alert_ids": []any{"alt_missing"}}, 422)
+		h.do("POST", "/cases/"+caseID+"/alerts", map[string]any{"alert_ids": []any{}}, 422, reqOpt{loose: true})
+		h.do("POST", "/cases/cas_missing/alerts", map[string]any{"alert_ids": ids}, 404)
+		snaps, _ := h.do("GET", "/cases/"+caseID+"/alerts?sort=linked_at", nil, 200)
+		if len(snaps["items"].([]any)) != 2 || snaps["items"].([]any)[0].(map[string]any)["snapshot"].(map[string]any)["title"] == nil {
+			t.Errorf("snapshots: %v", snaps)
+		}
+		h.do("GET", "/cases/cas_missing/alerts", nil, 404)
+		if a, _, _ := st.Alerts.Get(ctx, ids[1]); a.CaseID != caseID {
+			t.Errorf("alert.case_id not set: %q", a.CaseID)
+		}
+		obs, _ := h.do("GET", "/observables?case_id="+caseID, nil, 200)
+		if len(obs["items"].([]any)) < 1 {
+			t.Errorf("observables of the alert must follow it into the case: %v", obs)
+		}
+		withAlerts, _ := h.do("POST", "/cases", map[string]any{"title": "Campaign", "alert_ids": []any{ids[1]}}, 201)
+		if len(withAlerts["alert_ids"].([]any)) != 1 {
+			t.Errorf("create with alert_ids: %v", withAlerts)
+		}
+		h.do("POST", "/cases", map[string]any{"title": "x", "alert_ids": []any{"alt_missing"}}, 422)
+
+		task, _ := h.do("POST", "/cases/"+caseID+"/tasks", map[string]any{"title": "Reset password"}, 201)
+		tid := sa(task, "id")
+		done, _ := h.do("PATCH", "/cases/"+caseID+"/tasks/"+tid, map[string]any{"status": "done", "assignee": "carol"}, 200)
+		if done["status"] != "done" || done["assignee"] != "carol" {
+			t.Errorf("task patch: %v", done)
+		}
+		h.do("PATCH", "/cases/"+caseID+"/tasks/"+tid, map[string]any{"status": "exploded"}, 422, reqOpt{loose: true})
+		h.do("PATCH", "/cases/"+sa(withAlerts, "id")+"/tasks/"+tid, map[string]any{"status": "open"}, 404) // task of another case
+		h.do("PATCH", "/cases/"+caseID+"/tasks/tsk_missing", map[string]any{"status": "open"}, 404)
+
+		ev, _ := h.do("POST", "/cases/"+caseID+"/evidence?filename=headers.eml", nil, 201, reqOpt{raw: []byte("Received: from evil\r\n"), ctype: "message/rfc822"})
+		if ev["size"] != float64(21) || len(sa(ev, "sha256")) != 64 || ev["content_type"] != "message/rfc822" {
+			t.Fatalf("evidence: %v", ev)
+		}
+		h.do("POST", "/cases/"+caseID+"/evidence?filename=empty.txt", nil, 400, reqOpt{raw: []byte{}, ctype: "text/plain"})
+		h.do("POST", "/cases/"+caseID+"/evidence?filename=", nil, 422, reqOpt{raw: []byte("x"), ctype: "text/plain", loose: true})
+		h.do("POST", "/cases/cas_missing/evidence?filename=a.txt", nil, 404, reqOpt{raw: []byte("x"), ctype: "text/plain"})
+		link, _ := h.do("GET", "/cases/"+caseID+"/evidence/"+sa(ev, "id"), nil, 200)
+		if !strings.HasPrefix(sa(link, "url"), "memory://soar-evidence/") {
+			t.Errorf("evidence link: %v", link)
+		}
+		h.do("GET", "/cases/"+caseID+"/evidence/evd_missing", nil, 404)
+		got, _ := h.do("GET", "/cases/"+caseID, nil, 200)
+		if len(got["evidence"].([]any)) != 1 {
+			t.Errorf("case evidence: %v", got["evidence"])
+		}
+	})
+
 	t.Run("observables", func(t *testing.T) {
 		h.t = t
 		list, _ := h.do("GET", "/observables?type=ip&case_id="+caseID+"&sort=-first_seen", nil, 200)
@@ -486,11 +796,15 @@ func TestContract(t *testing.T) {
 
 	t.Run("connections", func(t *testing.T) {
 		h.t = t
-		h.do("POST", "/connections", map[string]any{"connector_id": "iris", "name": "iris-prod", "auth_type": "bearer",
-			"secret_refs": map[string]any{"token": "a literal secret with spaces!"}}, 422, reqOpt{loose: true})
+		h.do("POST", "/connections", map[string]any{
+			"connector_id": "iris", "name": "iris-prod", "auth_type": "bearer",
+			"secret_refs": map[string]any{"token": "a literal secret with spaces!"},
+		}, 422, reqOpt{loose: true})
 		h.do("POST", "/connections", map[string]any{"connector_id": "iris", "name": "x", "auth_type": "telepathy"}, 422, reqOpt{loose: true})
-		c, hdr := h.do("POST", "/connections", map[string]any{"connector_id": "iris", "name": "iris-prod", "auth_type": "bearer",
-			"secret_refs": map[string]any{"token": "iris_service_token"}, "config": map[string]any{"base_url": "https://iris.example"}}, 201)
+		c, hdr := h.do("POST", "/connections", map[string]any{
+			"connector_id": "iris", "name": "iris-prod", "auth_type": "bearer",
+			"secret_refs": map[string]any{"token": "iris_service_token"}, "config": map[string]any{"base_url": "https://iris.example"},
+		}, 201)
 		id := sa(c, "id")
 		if hdr.Get("Location") != Prefix+"/connections/"+id {
 			t.Errorf("location: %v", hdr)
@@ -500,9 +814,200 @@ func TestContract(t *testing.T) {
 			t.Errorf("list: %v", list)
 		}
 		h.do("GET", "/connections/"+id, nil, 200)
+		h.do("POST", "/connections/"+id+"/test", nil, 422) // "iris" is not an installed connector (the package is dfir_iris)
+		wz, _ := h.do("POST", "/connections", map[string]any{
+			"connector_id": "wazuh", "name": "wazuh-mgr", "auth_type": "basic",
+			"secret_refs": map[string]any{"password": "wazuh_api_password"}, "config": map[string]any{"base_url": "https://wazuh.example:55000", "username": "soar"},
+		}, 201)
+		res, _ := h.do("POST", "/connections/"+sa(wz, "id")+"/test", nil, 200)
+		if res["ok"] != false || sa(res, "execution_id") == "" || !strings.HasPrefix(fq.last().ID, "start:") {
+			t.Errorf("connection test (nothing processes it in this test): %v", res)
+		}
+		h.do("POST", "/connections/con_missing/test", nil, 404)
 		h.do("DELETE", "/connections/"+id, nil, 204)
 		h.do("GET", "/connections/"+id, nil, 404)
 		h.do("DELETE", "/connections/"+id, nil, 404)
+	})
+
+	t.Run("sources_mappings_filters_lists", func(t *testing.T) {
+		h.t = t
+		all, _ := h.do("GET", "/sources?sort=name", nil, 200)
+		if n := len(all["items"].([]any)); n != 2 {
+			t.Fatalf("the Wazuh pack installs two sources, got %d", n)
+		}
+		push, _ := h.do("GET", "/sources?adapter=webhook&enabled=true&system=wazuh-prod", nil, 200)
+		pushItem := push["items"].([]any)[0].(map[string]any)
+		pid := sa(pushItem, "id")
+		if len(push["items"].([]any)) != 1 || pushItem["name"] != "wazuh-prod" {
+			t.Fatalf("push source: %v", push)
+		}
+		got, ghdr := h.do("GET", "/sources/"+pid, nil, 200)
+		if got["mapping_id"] != "wazuh_alert@1" {
+			t.Errorf("source: %v", got)
+		}
+		h.do("GET", "/sources/sr_missing", nil, 404)
+		hl, _ := h.do("GET", "/sources/"+pid+"/health", nil, 200)
+		if hl["source"] != "wazuh-prod" {
+			t.Errorf("health: %v", hl)
+		}
+
+		// creating sources: every mistake is reported with a path, secrets are never inline
+		bad, _ := h.do("POST", "/sources", map[string]any{"name": "Bad Name", "adapter": "carrier-pigeon", "parser": "xml", "mapping": "wazuh_alert@1"}, 422, reqOpt{loose: true})
+		for _, want := range []string{"name", "adapter", "parser"} {
+			if !contains(problemPaths(bad), want) {
+				t.Errorf("422 must point at %s: %v", want, bad)
+			}
+		}
+		lit, _ := h.do("POST", "/sources", map[string]any{
+			"name": "acme", "adapter": "webhook", "parser": "json", "mapping": "wazuh_alert@1",
+			"auth": map[string]any{"type": "token", "token_ref": "my-literal-secret!"},
+		}, 422)
+		if !contains(problemPaths(lit), "auth.token_ref") {
+			t.Errorf("inline secrets must be refused: %v", lit)
+		}
+		h.do("POST", "/sources", map[string]any{
+			"name": "acme", "adapter": "webhook", "parser": "json", "mapping": "nope@3",
+			"auth": map[string]any{"type": "none"},
+		}, 422)
+		h.do("POST", "/sources", map[string]any{"name": "acme", "adapter": "poll_http", "parser": "json", "mapping": "wazuh_alert@1", "schedule": "whenever"}, 422)
+		src := map[string]any{
+			"name": "acme-siem", "adapter": "webhook", "parser": "json", "mapping": "wazuh_alert@1", "filters": []any{"wazuh-default@1"},
+			"auth": map[string]any{"type": "token", "token_ref": "env:ACME_TOKEN"}, "dedup": map[string]any{"window": "5m"}, "rate_limit": map[string]any{"rps": 50, "burst": 100},
+		}
+		created, chdr := h.do("POST", "/sources", src, 201)
+		sid := sa(created, "id")
+		if created["system"] != "acme-siem" || created["enabled"] != true || chdr.Get("Location") != Prefix+"/sources/"+sid {
+			t.Errorf("created source: %v", created)
+		}
+		dupe, _ := h.do("POST", "/sources", src, 409)
+		if !strings.HasSuffix(sa(dupe, "type"), "already-exists") {
+			t.Errorf("one source per name: %v", dupe)
+		}
+		etag := chdr.Get("ETag")
+		h.do("PATCH", "/sources/"+sid, map[string]any{"enabled": false, "rate_limit": map[string]any{"rps": 10, "burst": 20}}, 200, reqOpt{headers: map[string]string{"If-Match": etag}})
+		h.do("PATCH", "/sources/"+sid, map[string]any{"enabled": true}, 409, reqOpt{headers: map[string]string{"If-Match": etag}})
+		h.do("PATCH", "/sources/"+sid, map[string]any{"mapping": "wazuh_alert@9"}, 422)
+		h.do("PATCH", "/sources/"+sid, map[string]any{"rate_limit": map[string]any{"rps": 0}}, 422)
+		h.do("PATCH", "/sources/sr_missing", map[string]any{"enabled": true}, 404)
+		_ = ghdr
+
+		// testing a source: sample payloads go through parser, filters and mapping, nothing is published
+		alert := func(level int, id string) map[string]any {
+			return map[string]any{
+				"id": "t." + id, "timestamp": "2026-10-29T12:48:31.597+0600", "rule": map[string]any{"level": level, "id": id, "description": "sshd: authentication success."},
+				"agent": map[string]any{"id": "001", "name": "web01"}, "data": map[string]any{"srcip": "10.10.192.1"},
+			}
+		}
+		tr, _ := h.do("POST", "/sources/"+pid+"/test", map[string]any{"payload": []any{alert(3, "5715"), alert(1, "100"), map[string]any{"id": "x", "rule": map[string]any{"level": 5, "id": "1", "description": "no time"}}}}, 200)
+		if len(tr["events"].([]any)) != 1 || tr["filtered"] != float64(1) || len(tr["failures"].([]any)) != 1 || tr["rules_fired"].(map[string]any)["wazuh-default/min-level|drop"] != float64(1) {
+			t.Errorf("source test: %v", tr)
+		}
+		h.do("POST", "/sources/"+pid+"/test", map[string]any{"payload": "{not json"}, 422)
+		h.do("POST", "/sources/"+pid+"/test", map[string]any{}, 422, reqOpt{loose: true})
+		h.do("POST", "/sources/sr_missing/test", map[string]any{"payload": alert(3, "1")}, 404)
+
+		// mappings: published versions are immutable, every publish makes the next version
+		def := map[string]any{"fields": map[string]any{"title": "raw.msg", "severity": "3"}, "dedup_key": []any{"raw.msg"}}
+		m1, _ := h.do("POST", "/mappings", map[string]any{"name": "acme_alert", "definition": def}, 201)
+		m2, _ := h.do("POST", "/mappings", map[string]any{"name": "acme_alert", "definition": def}, 201)
+		if m1["version"] != float64(1) || m2["version"] != float64(2) {
+			t.Errorf("versions: %v %v", m1["version"], m2["version"])
+		}
+		badDef, _ := h.do("POST", "/mappings", map[string]any{"name": "broken", "definition": map[string]any{"fields": map[string]any{"title": "raw.msg >=", "bogus": "1"}}}, 422)
+		if len(problemPaths(badDef)) < 2 {
+			t.Errorf("every problem in a definition is listed: %v", badDef)
+		}
+		h.do("POST", "/mappings", map[string]any{"name": "x"}, 422, reqOpt{loose: true})
+		ml, _ := h.do("GET", "/mappings?name=acme_alert&sort=-version", nil, 200)
+		if len(ml["items"].([]any)) != 2 || ml["items"].([]any)[0].(map[string]any)["version"] != float64(2) {
+			t.Errorf("mapping list: %v", ml)
+		}
+		h.do("GET", "/mappings/"+sa(m1, "id"), nil, 200)
+		h.do("GET", "/mappings/map_missing", nil, 404)
+
+		ok, _ := h.do("POST", "/mappings/test", map[string]any{"mapping": "wazuh_alert@1", "sample": alert(3, "5715")}, 200)
+		if ok["valid"] != true || ok["alert"].(map[string]any)["severity"] != float64(1) {
+			t.Errorf("mapping test: %v", ok)
+		}
+		fail, _ := h.do("POST", "/mappings/test", map[string]any{"mapping": "wazuh_alert@1", "sample": map[string]any{"id": "x", "rule": map[string]any{"level": 5, "id": "1", "description": "d"}}}, 200)
+		if fail["valid"] != false || fail["error"].(map[string]any)["field"] != "fields.occurred_at" || fail["error"].(map[string]any)["expr"] == nil {
+			t.Errorf("a failing mapping must name the expression: %v", fail)
+		}
+		inline, _ := h.do("POST", "/mappings/test", map[string]any{"definition": def, "sample": map[string]any{"msg": "hello"}}, 200)
+		if inline["valid"] != true || inline["alert"].(map[string]any)["title"] != "hello" {
+			t.Errorf("inline mapping: %v", inline)
+		}
+		h.do("POST", "/mappings/test", map[string]any{"definition": map[string]any{"fields": map[string]any{"title": "(("}}, "sample": map[string]any{}}, 200)
+		h.do("POST", "/mappings/test", map[string]any{"mapping": "wazuh_alert@1", "definition": def, "sample": map[string]any{}}, 422, reqOpt{loose: true})
+		h.do("POST", "/mappings/test", map[string]any{"mapping": "wazuh_alert", "sample": map[string]any{}}, 422)
+		h.do("POST", "/mappings/test", map[string]any{"mapping": "nope@4", "sample": map[string]any{}}, 404)
+
+		// filter sets
+		rules := []any{map[string]any{"name": "no-lab", "stage": "pre_map", "action": "drop", "when": `get_path(raw, "agent.name") == "lab01"`}}
+		f1, _ := h.do("POST", "/filters", map[string]any{"name": "acme-default", "rules": rules}, 201)
+		f2, _ := h.do("POST", "/filters", map[string]any{"name": "acme-default", "mode": "all", "default": "keep", "rules": rules}, 201)
+		if f1["version"] != float64(1) || f2["version"] != float64(2) || f1["mode"] != "first_match" {
+			t.Errorf("filter versions: %v %v", f1, f2)
+		}
+		h.do("POST", "/filters", map[string]any{"name": "bad", "rules": []any{map[string]any{"name": "r", "stage": "pre_map", "action": "explode", "when": "true"}}}, 422)
+		h.do("POST", "/filters", map[string]any{"name": "bad", "rules": []any{map[string]any{"name": "r", "stage": "pre_map", "action": "drop", "script": "x.py"}}}, 422)
+		h.do("POST", "/filters", map[string]any{"name": "bad"}, 422, reqOpt{loose: true})
+		fl, _ := h.do("GET", "/filters?name=acme-default", nil, 200)
+		if len(fl["items"].([]any)) != 2 {
+			t.Errorf("filter list: %v", fl)
+		}
+		h.do("GET", "/filters/"+sa(f1, "id"), nil, 200)
+		h.do("GET", "/filters/flt_missing", nil, 404)
+
+		// managed lists feed in_list() in filters, without a deploy
+		put, phdr := h.do("PUT", "/lists/wazuh_noisy_rule_ids", map[string]any{"items": []any{"1002", "1003"}}, 200)
+		if len(put["items"].([]any)) != 2 || phdr.Get("ETag") == "" {
+			t.Errorf("put list: %v", put)
+		}
+		h.do("PUT", "/lists/wazuh_noisy_rule_ids", map[string]any{"items": []any{""}}, 422, reqOpt{loose: true})
+		h.do("GET", "/lists/wazuh_noisy_rule_ids", nil, 200)
+		h.do("GET", "/lists/nope", nil, 404)
+		ll, _ := h.do("GET", "/lists", nil, 200)
+		if len(ll["items"].([]any)) != 2 {
+			t.Errorf("lists: %v", ll)
+		}
+		noisy := alert(12, "1002")
+		ft, _ := h.do("POST", "/filters/test", map[string]any{"filter_set": "wazuh-default@1", "sample": noisy}, 200)
+		if ft["drop"] != true || ft["rule"] != "drop-noisy-rule-ids" || len(ft["trace"].([]any)) == 0 {
+			t.Errorf("the edited list must take effect immediately: %v", ft)
+		}
+		ft, _ = h.do("POST", "/filters/test", map[string]any{"filter_set": "wazuh-default@1", "sample": alert(12, "7")}, 200)
+		if ft["drop"] != false {
+			t.Errorf("a high-level alert is kept: %v", ft)
+		}
+		ft, _ = h.do("POST", "/filters/test", map[string]any{"inline": map[string]any{"rules": []any{map[string]any{"name": "tagit", "stage": "pre_map", "action": "tag", "tag": "vip", "when": "true"}}}, "sample": noisy}, 200)
+		if ft["drop"] != false || ft["tags"].([]any)[0] != "vip" {
+			t.Errorf("inline filter: %v", ft)
+		}
+		h.do("POST", "/filters/test", map[string]any{"filter_set": "wazuh-default@1", "inline": map[string]any{}, "sample": noisy}, 422, reqOpt{loose: true})
+		h.do("POST", "/filters/test", map[string]any{"filter_set": "wazuh-default@1", "stage": "later", "sample": noisy}, 422, reqOpt{loose: true})
+		h.do("POST", "/filters/test", map[string]any{"filter_set": "nope@1", "sample": noisy}, 404)
+	})
+
+	t.Run("dead_letters_and_queue_stats", func(t *testing.T) {
+		h.t = t
+		page, _ := h.do("GET", "/dlq?limit=2", nil, 200)
+		if len(page["items"].([]any)) != 2 || sa(page, "next_cursor") != "7" {
+			t.Errorf("dlq page: %v", page)
+		}
+		h.do("GET", "/dlq?cursor=7", nil, 200)
+		h.do("GET", "/dlq?cursor=abc", nil, 400, reqOpt{loose: true})
+		h.do("GET", "/dlq?bogus=1", nil, 400, reqOpt{loose: true})
+		rp, _ := h.do("POST", "/dlq/8/replay", nil, 200)
+		if rp["replayed"] != float64(8) {
+			t.Errorf("replay: %v", rp)
+		}
+		h.do("POST", "/dlq/999/replay", nil, 404)
+		h.do("POST", "/dlq/abc/replay", nil, 400)
+		qs, _ := h.do("GET", "/queues/stats", nil, 200)
+		if len(qs["streams"].([]any)) != 2 {
+			t.Errorf("stats: %v", qs)
+		}
 	})
 
 	t.Run("every_operation_was_exercised", func(t *testing.T) {
@@ -651,5 +1156,74 @@ func TestConcurrentCreateOfSameWorkflowNameYieldsOneWinner(t *testing.T) {
 	}
 	if created != 1 || conflicts != 11 {
 		t.Fatalf("want exactly one 201 and eleven 409s, got %d and %d", created, conflicts)
+	}
+}
+
+// fakeQueue stands in for NATS: dead letters 6-8, replay of 8 works, anything else is unknown.
+// Published messages are recorded.
+type fakeQueue struct {
+	mu  sync.Mutex
+	pub []queue.Msg
+}
+
+func (f *fakeQueue) Publish(_ context.Context, m queue.Msg) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.pub = append(f.pub, m)
+	return nil
+}
+
+func (f *fakeQueue) last() queue.Msg {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.pub) == 0 {
+		return queue.Msg{}
+	}
+	return f.pub[len(f.pub)-1]
+}
+
+func (*fakeQueue) DLQList(_ context.Context, limit int, before uint64) ([]queue.DLQEntry, error) {
+	all := []queue.DLQEntry{}
+	for seq := uint64(8); seq >= 6; seq-- {
+		all = append(all, queue.DLQEntry{Seq: seq, Subject: "dlq.events", OriginSubject: "events.wazuh-prod", Reason: "max deliveries exceeded", Deliveries: 5, StoredAt: time.Now().UTC(), Size: 100})
+	}
+	var out []queue.DLQEntry
+	for _, e := range all {
+		if before == 0 || e.Seq < before {
+			out = append(out, e)
+		}
+	}
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
+
+func (*fakeQueue) DLQReplay(_ context.Context, seq uint64) error {
+	if seq == 8 {
+		return nil
+	}
+	return queue.ErrNotInDLQ
+}
+
+func (*fakeQueue) Stats(context.Context) ([]queue.StreamStats, error) {
+	return []queue.StreamStats{
+		{Name: "EVENTS", Messages: 3, Bytes: 900, MaxBytes: 1 << 30, Consumers: []queue.ConsumerStats{{Name: "processor", Pending: 3}}},
+		{Name: "DLQ", Messages: 3, Bytes: 300},
+	}, nil
+}
+
+func TestQueueEndpointsAnswer503WithoutNATS(t *testing.T) {
+	srv := newTestServer(t, memory.NewStore("soar"))
+	for _, tc := range [][2]string{{"GET", "/dlq"}, {"POST", "/dlq/1/replay"}, {"GET", "/queues/stats"}} {
+		req, _ := http.NewRequestWithContext(context.Background(), tc[0], srv.URL+Prefix+tc[1], nil)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != 503 {
+			t.Errorf("%s %s: %d, want 503", tc[0], tc[1], resp.StatusCode)
+		}
 	}
 }

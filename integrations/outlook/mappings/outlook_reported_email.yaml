@@ -1,0 +1,19 @@
+# A message in the phishing-report mailbox -> alert. Attachments are listed in ext (hasAttachments);
+# workflows fetch them with outlook.mail.get_attachment and store them as case evidence.
+id: outlook_reported_email
+version: 1
+kind: alert
+fields:
+  external_id: 'raw.id'
+  title: '"Reported email: " + coalesce(get_path(raw, "subject"), "(no subject)")'
+  description: 'coalesce(get_path(raw, "body.content"), get_path(raw, "bodyPreview"), "")'
+  severity: '3'
+  occurred_at: 'parse_time(raw.receivedDateTime)'
+  tags: '["phishing-report", "email"]'
+observables:
+  - { type: email, value: 'get_path(raw, "from.emailAddress.address")', role: source }
+  - { type: email, value: 'get_path(raw, "sender.emailAddress.address")', role: source }
+  - { type: url, from: 'extract_urls(coalesce(get_path(raw, "body.content"), get_path(raw, "bodyPreview"), ""))' }
+  - { type: ip, from: 'extract_ips(coalesce(get_path(raw, "body.content"), ""))' }
+dedup_key: ['raw.id']
+ext: 'raw'

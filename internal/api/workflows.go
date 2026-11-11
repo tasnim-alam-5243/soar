@@ -42,7 +42,19 @@ func validateTriggers(v *verr, ts []domain.Trigger) {
 		p := "triggers[" + itoa(i) + "]"
 		v.oneOf(p+".type", t.Type, "alert", "schedule", "manual", "event")
 		v.maxLen(p+".match", t.Match, 4000)
+		v.maxLen(p+".cron", t.Cron, 200)
 	}
+	for _, e := range triggerErrors(triggersAny(ts)) {
+		v.add(e.Path, "%s", e.Message)
+	}
+}
+
+func triggersAny(ts []domain.Trigger) []any {
+	out := make([]any, len(ts))
+	for i, t := range ts {
+		out[i] = toJSONMap(t)
+	}
+	return out
 }
 
 func itoa(i int) string { return strconv.Itoa(i) }
@@ -89,14 +101,20 @@ func (s *Server) createWorkflow(w http.ResponseWriter, r *http.Request) error {
 		if !errors.Is(err, store.ErrNotFound) {
 			return domain.Workflow{}, "", err
 		}
-		doc := s.workflowDoc(in.Name, in.Description, 1, in.Definition, in.Triggers, r)
+		def, triggers, _, err := liftTriggers(in.Definition, in.Triggers)
+		if err != nil {
+			return domain.Workflow{}, "", err
+		}
+		doc := s.workflowDoc(in.Name, in.Description, 1, def, triggers, r)
 		return doc, doc.ID, nil
 	})
 }
 
 func (s *Server) listWorkflows(w http.ResponseWriter, r *http.Request) error {
-	q, v, err := listQuery(r, sortSpec{fields: map[string]string{"created_at": "created_at", "name": "name.raw", "version": "version"},
-		defaultName: "created_at", defaultDesc: true}, "name", "status")
+	q, v, err := listQuery(r, sortSpec{
+		fields:      map[string]string{"created_at": "created_at", "name": "name.raw", "version": "version"},
+		defaultName: "created_at", defaultDesc: true,
+	}, "name", "status")
 	if err != nil {
 		return err
 	}
@@ -121,6 +139,10 @@ func (s *Server) updateWorkflow(w http.ResponseWriter, r *http.Request) error {
 	if err := in.validate(); err != nil {
 		return err
 	}
+	def, triggers, _, err := liftTriggers(in.Definition, in.Triggers)
+	if err != nil {
+		return err
+	}
 	doc, ver, err := mutate(r, s.st.Workflows, r.PathValue("id"), func(d *domain.Workflow) error {
 		if d.Status != "draft" {
 			return conflict("immutable", "only draft versions can be edited; "+d.Status+" versions are immutable (create a new version instead)")
@@ -128,8 +150,8 @@ func (s *Server) updateWorkflow(w http.ResponseWriter, r *http.Request) error {
 		if in.Name != d.Name {
 			return unprocessable([]FieldError{{Path: "name", Message: "a workflow's name cannot be changed"}})
 		}
-		d.Description, d.Definition, d.Triggers = in.Description, in.Definition, in.Triggers
-		d.Checksum = checksum(in.Definition, in.Triggers)
+		d.Description, d.Definition, d.Triggers = in.Description, def, triggers
+		d.Checksum = checksum(def, triggers)
 		return nil
 	})
 	if err != nil {
@@ -154,7 +176,8 @@ func (s *Server) newWorkflowVersion(w http.ResponseWriter, r *http.Request) erro
 			return domain.Workflow{}, "", err
 		}
 		latest, err := s.st.Workflows.List(r.Context(), store.ListQuery{
-			Terms: map[string][]string{"name.raw": {src.Name}}, Sort: "version", Desc: true, Limit: 1})
+			Terms: map[string][]string{"name.raw": {src.Name}}, Sort: "version", Desc: true, Limit: 1,
+		})
 		if err != nil {
 			return domain.Workflow{}, "", err
 		}
@@ -173,11 +196,20 @@ func (s *Server) newWorkflowVersion(w http.ResponseWriter, r *http.Request) erro
 			}
 		}
 		def, triggers, desc := src.Definition, src.Triggers, src.Description
-		if in.Definition != nil {
-			def = in.Definition
-		}
 		if in.Triggers != nil {
 			triggers = in.Triggers
+		}
+		if in.Definition != nil {
+			rest, lifted, declared, err := liftTriggers(in.Definition, in.Triggers)
+			if err != nil {
+				return domain.Workflow{}, "", err
+			}
+			def = rest
+			if declared {
+				triggers = lifted // the new definition declares its triggers (merged with any given at top level)
+			}
+		} else if rest, lifted, declared, err := liftTriggers(src.Definition, triggers); err == nil && declared {
+			def, triggers = rest, lifted // a version stored before triggers were lifted: normalize it now
 		}
 		if in.Description != nil {
 			desc = *in.Description
@@ -192,7 +224,9 @@ func (s *Server) publishWorkflow(w http.ResponseWriter, r *http.Request) error {
 		if d.Status != "draft" {
 			return conflict("not-draft", "only draft versions can be published; this one is "+d.Status)
 		}
-		if errs := validateDefinition(d.Definition); len(errs) > 0 {
+		errs := s.validateDefinition(d.Definition)
+		errs = append(errs, triggerErrors(triggersAny(d.Triggers))...)
+		if len(errs) > 0 {
 			return unprocessable(errs)
 		}
 		d.Status = "published"
@@ -222,7 +256,7 @@ func (s *Server) validateWorkflow(w http.ResponseWriter, r *http.Request) error 
 	if in.Definition == nil {
 		return unprocessable([]FieldError{{Path: "definition", Message: "is required and must be an object"}})
 	}
-	errs := validateDefinition(in.Definition)
+	errs := s.validateDefinition(in.Definition)
 	if errs == nil {
 		errs = []FieldError{}
 	}

@@ -12,24 +12,55 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
-        with: { go-version-file: go.mod, cache: true }
-      - uses: golangci/golangci-lint-action@v6
-        with: { version: v1.64.8 }
+        with: { go-version: "1.26", check-latest: true, cache: true }
+      - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        with: { version: v2.15.0 }
 
   unit:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
-        with: { go-version-file: go.mod, cache: true }
+        with: { go-version: "1.26", check-latest: true, cache: true }
       - run: go vet ./...
       - run: go test -race -count=1 ./...
+
+  # Spec section 13: govulncheck, pip-audit and image scans in CI.
+  security:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version: "1.26", check-latest: true, cache: true }
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: python -m venv runner/python/.venv && runner/python/.venv/bin/pip install -r runner/python/requirements-dev.txt
+      - name: Security suite (Step 9 gate)
+        run: make test-security
+      - name: Known vulnerabilities (govulncheck, pip-audit)
+        run: make vulncheck
 
   image:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - run: make image
+      - name: Scan images (HIGH and CRITICAL with a fix fail the build)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          image-ref: soar:dev
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+      - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          image-ref: soar-runner:dev
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+          skip-setup-trivy: true
 
   integration:
     runs-on: ubuntu-latest
@@ -38,7 +69,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
-        with: { go-version-file: go.mod, cache: true }
+        with: { go-version: "1.26", check-latest: true, cache: true }
       - name: OpenSearch kernel setting
         run: sudo sysctl -w vm.max_map_count=262144
       - name: Start stack (Step 1 exit gate)
@@ -49,3 +80,24 @@ jobs:
         run: docker compose -f deploy/compose/docker-compose.yml logs --no-color --tail=200
       - run: make clean
         if: always()
+
+  python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: python -m venv runner/python/.venv && runner/python/.venv/bin/pip install -r runner/python/requirements-dev.txt
+      - run: make test-python
+
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: "22", cache: npm, cache-dependency-path: web/package-lock.json }
+      - run: make web-install
+      - name: API types match openapi.yaml
+        run: cd web && npm run gen:api && git diff --exit-code src/lib/schema.d.ts
+      - run: make web-test
+      - run: make web-build

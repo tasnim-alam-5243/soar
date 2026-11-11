@@ -374,6 +374,7 @@ func NewStore(prefix string) *store.Store {
 		Principals:  NewRepo[domain.Principal](n.Index("principals")),
 		Idempotency: NewRepo[domain.Idempotency](n.Index("idempotency")),
 		Timers:      NewRepo[domain.Timer](n.Index("timers")),
+		Approvals:   NewRepo[domain.Approval](n.Index("approvals")),
 		Sources:     NewRepo[domain.Source](n.Index("sources")),
 		Mappings:    NewRepo[domain.Mapping](n.Index("mappings")),
 		Filters:     NewRepo[domain.FilterSet](n.Index("filters")),
@@ -383,4 +384,21 @@ func NewStore(prefix string) *store.Store {
 		Seen:        NewRepo[domain.Seen](n.Index("seen")),
 		Connections: NewRepo[domain.Connection](n.Index("connections")),
 	}
+}
+
+// Count implements store.Counter.
+func (r *Repo[T]) Count(_ context.Context, q store.ListQuery) (int64, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var n int64
+	for _, e := range r.docs {
+		var m map[string]any
+		if err := json.Unmarshal(e.raw, &m); err != nil {
+			return 0, err
+		}
+		if matches(m, q) {
+			n++
+		}
+	}
+	return n, nil
 }

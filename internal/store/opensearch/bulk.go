@@ -159,8 +159,10 @@ func (b *Bulk) send(ctx context.Context, body []byte, want int) ([]store.BulkRes
 	res := make([]store.BulkResult, 0, want)
 	for _, wrapper := range resp.Items {
 		for _, it := range wrapper { // exactly one entry: the action name
-			r := store.BulkResult{Status: it.Status, ID: it.ID,
-				Version: store.Version{Index: it.Index, SeqNo: it.SeqNo, PrimaryTerm: it.PrimaryTerm}}
+			r := store.BulkResult{
+				Status: it.Status, ID: it.ID,
+				Version: store.Version{Index: it.Index, SeqNo: it.SeqNo, PrimaryTerm: it.PrimaryTerm},
+			}
 			if it.Error != nil {
 				r.Err = &store.BulkError{Type: it.Error.Type, Reason: it.Error.Reason}
 			}

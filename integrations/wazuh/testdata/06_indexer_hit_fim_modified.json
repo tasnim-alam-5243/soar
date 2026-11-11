@@ -1,0 +1,72 @@
+{
+  "_index": "wazuh-alerts-4.x-2026.10.29",
+  "_id": "Zm9vYmFy",
+  "_score": null,
+  "_source": {
+    "timestamp": "2026-10-29T12:56:40.456+0600",
+    "rule": {
+      "level": 7,
+      "description": "Integrity checksum changed.",
+      "id": "550",
+      "firedtimes": 1,
+      "mail": false,
+      "groups": [
+        "ossec",
+        "syscheck",
+        "syscheck_entry_modified",
+        "syscheck_file"
+      ],
+      "mitre": {
+        "id": [
+          "T1565.001"
+        ],
+        "tactic": [
+          "Impact"
+        ],
+        "technique": [
+          "Stored Data Manipulation"
+        ]
+      }
+    },
+    "agent": {
+      "id": "001",
+      "name": "web01"
+    },
+    "manager": {
+      "name": "wazuh-manager"
+    },
+    "id": "1793257000.13000",
+    "decoder": {
+      "name": "syscheck_integrity_changed"
+    },
+    "location": "syscheck",
+    "full_log": "File '/etc/ld.so.cache' modified\nMode: scheduled\nChanged attributes: size,mtime,md5,sha1,sha256\n",
+    "syscheck": {
+      "path": "/etc/ld.so.cache",
+      "mode": "scheduled",
+      "event": "modified",
+      "changed_attributes": [
+        "size",
+        "mtime",
+        "md5",
+        "sha1",
+        "sha256"
+      ],
+      "size_before": "25000",
+      "size_after": "26000",
+      "md5_before": "11111111111111111111111111111111",
+      "sha1_before": "2222222222222222222222222222222222222222",
+      "sha256_before": "3333333333333333333333333333333333333333333333333333333333333333",
+      "md5_after": "5d41402abc4b2a76b9719d911017c592",
+      "sha1_after": "aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d",
+      "sha256_after": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+    },
+    "@timestamp": "2026-10-29T06:56:40.456Z",
+    "input": {
+      "type": "log"
+    }
+  },
+  "sort": [
+    1793257000456
+  ]
+}

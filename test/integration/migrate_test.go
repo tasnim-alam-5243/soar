@@ -39,8 +39,10 @@ func testRunner(t *testing.T) (*migrate.Runner, *opensearch.Client, string) {
 		t.Fatal(err)
 	}
 	prefix := fmt.Sprintf("soartest%d", time.Now().UnixNano()%1_000_000_000)
-	r := &migrate.Runner{C: c, Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
-		Opts: schema.Options{Prefix: prefix, Retention: ret}}
+	r := &migrate.Runner{
+		C: c, Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Opts: schema.Options{Prefix: prefix, Retention: ret},
+	}
 	t.Cleanup(func() { cleanup(c, prefix) })
 	return r, c, prefix
 }
@@ -107,8 +109,10 @@ func TestStrictMappingRejectsUnknownFields(t *testing.T) {
 	}
 
 	// A valid document is accepted.
-	wf := domain.Workflow{Meta: domain.NewMeta(domain.PrefixWorkflow), Name: "phishing_triage", Version: 1,
-		Status: "draft", Definition: domain.JSON{"nodes": []any{map[string]any{"id": "a"}}}}
+	wf := domain.Workflow{
+		Meta: domain.NewMeta(domain.PrefixWorkflow), Name: "phishing_triage", Version: 1,
+		Status: "draft", Definition: domain.JSON{"nodes": []any{map[string]any{"id": "a"}}},
+	}
 	if _, _, err := c.Do(ctx, http.MethodPut, "/"+prefix+"-workflows/_doc/"+wf.ID+"?refresh=true", wf); err != nil {
 		t.Fatalf("valid workflow rejected: %v", err)
 	}
@@ -134,11 +138,13 @@ func TestAlertsRolloverAliasAndFlatExt(t *testing.T) {
 	if _, err := r.Apply(ctx); err != nil {
 		t.Fatal(err)
 	}
-	a := domain.Alert{Meta: domain.NewMeta(domain.PrefixAlert), Kind: "alert", SourceID: "wazuh-prod",
+	a := domain.Alert{
+		Meta: domain.NewMeta(domain.PrefixAlert), Kind: "alert", SourceID: "wazuh-prod",
 		Title: "sshd: authentication success", Severity: 1, ReceivedAt: time.Now().UTC(), OccurrenceCount: 1,
 		Observables: []domain.Observable{{Type: "ip", Value: "10.10.192.1", Role: "source"}},
 		// Vendor fields can have any shape under ext without being mapped one by one.
-		Ext: domain.JSON{"rule": map[string]any{"id": "5715", "groups": []any{"syslog", "sshd"}}, "anything_new": "ok"}}
+		Ext: domain.JSON{"rule": map[string]any{"id": "5715", "groups": []any{"syslog", "sshd"}}, "anything_new": "ok"},
+	}
 	// Write through the write alias, as the processor will.
 	if _, _, err := c.Do(ctx, http.MethodPut, "/"+prefix+"-alerts/_doc/"+a.ID+"?refresh=true", a); err != nil {
 		t.Fatalf("alert write via alias failed: %v", err)
@@ -157,11 +163,13 @@ func TestOutboxIsNestedSoSweeperQueriesAreExact(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := time.Now().UTC()
-	e := domain.Execution{Meta: domain.NewMeta(domain.PrefixExecution), WorkflowID: "wf_1", WorkflowVersion: 1, Status: "running",
+	e := domain.Execution{
+		Meta: domain.NewMeta(domain.PrefixExecution), WorkflowID: "wf_1", WorkflowVersion: 1, Status: "running",
 		Outbox: []domain.OutboxEntry{
 			{Key: "k1", Subject: "steps.normal.http", Published: true, CreatedAt: now},
 			{Key: "k2", Subject: "steps.normal.http", Published: false, CreatedAt: now},
-		}}
+		},
+	}
 	if _, _, err := c.Do(ctx, http.MethodPut, "/"+prefix+"-executions/_doc/"+e.ID+"?refresh=true", e); err != nil {
 		t.Fatal(err)
 	}
@@ -191,15 +199,23 @@ func TestLiveStackSchemaMatches(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	r := &migrate.Runner{C: osClient(), Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
-		Opts: schema.Options{Prefix: envOr("SOAR_INDEX_PREFIX", "soar"), Retention: ret,
-			StateReplicas: envInt("SOAR_OS_STATE_REPLICAS"), TimeSeriesReplicas: envInt("SOAR_OS_TS_REPLICAS")}}
+	r := &migrate.Runner{
+		C: osClient(), Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Opts: schema.Options{
+			Prefix: envOr("SOAR_INDEX_PREFIX", "soar"), Retention: ret,
+			StateReplicas: envInt("SOAR_OS_STATE_REPLICAS"), TimeSeriesReplicas: envInt("SOAR_OS_TS_REPLICAS"),
+		},
+	}
 	res, err := r.Check(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(res) != 22 {
-		t.Fatalf("want 22 indices checked, got %d", len(res))
+	plans, err := schema.BuildAll(r.Opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res) != len(plans) {
+		t.Fatalf("want %d indices checked (one per schema entity), got %d", len(plans), len(res))
 	}
 	for _, x := range res {
 		if x.Failed() {
@@ -218,4 +234,13 @@ func envOr(k, def string) string {
 func envInt(k string) int {
 	n, _ := strconv.Atoi(os.Getenv(k))
 	return n
+}
+
+// index names an alias of the stack under test (SOAR_INDEX_PREFIX, default soar).
+func index(name string) string {
+	prefix := os.Getenv("SOAR_INDEX_PREFIX")
+	if prefix == "" {
+		prefix = "soar"
+	}
+	return prefix + "-" + name
 }

@@ -7,7 +7,7 @@ import (
 	"github.com/yourorg/soar/internal/domain"
 )
 
-var secretNameRe = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,100}$`)
+var secretNameRe = regexp.MustCompile(`^(env:[A-Za-z_][A-Za-z0-9_]{0,99}|[A-Za-z0-9_.-]{1,100})$`)
 
 type connectionIn struct {
 	ConnectorID string         `json:"connector_id"`
@@ -40,15 +40,19 @@ func (s *Server) createConnection(w http.ResponseWriter, r *http.Request) error 
 		if err := v.err(); err != nil {
 			return domain.Connection{}, "", err
 		}
-		doc := domain.Connection{Meta: domain.NewMeta("con"), ConnectorID: in.ConnectorID, Name: in.Name,
-			AuthType: in.AuthType, SecretRefs: in.SecretRefs, Config: in.Config}
+		doc := domain.Connection{
+			Meta: domain.NewMeta("con"), ConnectorID: in.ConnectorID, Name: in.Name,
+			AuthType: in.AuthType, SecretRefs: in.SecretRefs, Config: in.Config,
+		}
 		return doc, doc.ID, nil
 	})
 }
 
 func (s *Server) listConnections(w http.ResponseWriter, r *http.Request) error {
-	q, v, err := listQuery(r, sortSpec{fields: map[string]string{"created_at": "created_at", "name": "name"},
-		defaultName: "created_at", defaultDesc: true}, "connector_id")
+	q, v, err := listQuery(r, sortSpec{
+		fields:      map[string]string{"created_at": "created_at", "name": "name"},
+		defaultName: "created_at", defaultDesc: true,
+	}, "connector_id")
 	if err != nil {
 		return err
 	}

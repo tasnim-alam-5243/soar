@@ -1,20 +1,32 @@
+version: "2"
 run:
   timeout: 5m
 linters:
-  disable-all: true
+  default: none
   enable:
     - errcheck
     - govet
     - staticcheck
     - unused
     - ineffassign
-    - gofumpt
     - errorlint
     - bodyclose
     - noctx
     - misspell
-linters-settings:
-  govet:
-    enable-all: false
-issues:
-  exclude-dirs: [web]
+  settings:
+    staticcheck:
+      # correctness (SA) and simplifications (S1); the style checks (ST, QF) are not enforced
+      checks: ["all", "-ST*", "-QF*"]
+  exclusions:
+    # the v1 defaults: unchecked Close/Flush/fmt.Fprint* and similar
+    presets: [std-error-handling, common-false-positives, legacy]
+    paths: [web]
+    rules:
+      # tests may use context-free requests and leave short-lived bodies to the test server
+      - path: _test\.go
+        linters: [noctx, bodyclose, errcheck]
+formatters:
+  enable:
+    - gofumpt
+  exclusions:
+    paths: [web]

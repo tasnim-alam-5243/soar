@@ -1,0 +1,75 @@
+// Go <-> Python contract for the sandboxed runner (spec section 10).
+// Regenerate with `make proto` after changing this file.
+syntax = "proto3";
+
+package soar.runner.v1;
+
+option go_package = "github.com/yourorg/soar/internal/runner/runnerpb";
+
+service Runner {
+  // Execute runs one action attempt. The stream carries log lines and ends with
+  // exactly one result or failure.
+  rpc Execute(ExecuteRequest) returns (stream ExecuteEvent);
+  // Filter runs a script filter over a batch of events (spec 9.5.1, up to 256 per call).
+  rpc Filter(FilterRequest) returns (FilterResponse);
+  // Health reports readiness and the actions the runner can execute.
+  rpc Health(HealthRequest) returns (HealthResponse);
+}
+
+message ExecuteRequest {
+  string action_id = 1;
+  string idempotency_key = 2;
+  bytes params_json = 3;
+  map<string, string> secrets = 4;   // connection secrets, memory only, never logged
+  Limits limits = 5;
+  string traceparent = 6;
+  string connector = 7;              // integration package name
+  string entrypoint = 8;             // "actions/case.py:create" relative to the package
+  bytes connection_json = 9;         // non-secret connection config
+  bool dry_run = 10;
+  string execution_id = 11;
+  string node_id = 12;
+  uint32 attempt = 13;
+}
+
+message Limits {
+  double cpu = 1;          // CPU seconds per call, as a multiple of timeout_s (0 = no extra cap)
+  uint32 memory_mb = 2;
+  uint32 timeout_s = 3;
+  repeated string egress = 4;
+}
+
+message ExecuteEvent {
+  oneof event {
+    string log = 1;
+    Result result = 2;
+    Failure failure = 3;
+  }
+}
+
+message Result { bytes output_json = 1; }
+
+message Failure {
+  string code = 1;
+  bool retryable = 2;
+  string message = 3;
+}
+
+message FilterRequest {
+  string script = 1;        // path relative to the scripts root, e.g. "filters/wazuh_extra.py"
+  bytes events_json = 2;    // JSON array of raw events
+  Limits limits = 3;
+}
+
+message FilterResponse {
+  repeated string decisions = 1;   // one per event: keep | drop | tag:<name> | severity:<1-5>
+  Failure failure = 2;             // set when the whole batch failed
+}
+
+message HealthRequest {}
+
+message HealthResponse {
+  bool ready = 1;
+  repeated string actions = 2;
+  string version = 3;
+}

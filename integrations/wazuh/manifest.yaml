@@ -1,0 +1,94 @@
+# Wazuh 4.14 manager REST API actions (spec 10.1). Endpoints are *verify* against your
+# manager version before marking them supported. Sources, mappings and filters of this
+# package live in sources/, mappings/, filters/ and lists/.
+name: wazuh
+title: Wazuh
+description: Wazuh manager API (agents, active response). Alerts arrive through the wazuh-prod (push) and wazuh-pull sources.
+version: "4.14"
+auth:
+  type: basic_jwt            # POST /security/user/authenticate with basic auth -> JWT (900 s)
+connection_schema:
+  type: object
+  required: [base_url, username]
+  properties:
+    base_url: { type: string, format: uri, description: "https://wazuh-manager:55000" }
+    username: { type: string }
+    ca_pem: { type: string, description: CA certificate of the manager API (PEM) }
+    timeout_s: { type: number }
+secrets: [password]
+defaults:
+  class: python
+  retryable_errors: [network, timeout, http_5xx, http_429]
+  limits: { cpu: 0.5, memory_mb: 128, timeout_s: 60 }
+actions:
+  - id: wazuh.connection.test
+    title: Test connection
+    description: Authenticate against the Wazuh manager API and return its version.
+    side_effect: read
+    risk: low
+    supports_dry_run: true
+    entrypoint: "actions/wazuh.py:connection_test"
+    params_schema: { type: object, additionalProperties: false, properties: {} }
+  - id: wazuh.agent.get
+    title: Get agent
+    description: Return one Wazuh agent (status, version, OS, IP, last keep-alive).
+    side_effect: read
+    risk: low
+    supports_dry_run: true
+    entrypoint: "actions/wazuh.py:agent_get"
+    params_schema:
+      type: object
+      additionalProperties: false
+      required: [agent_id]
+      properties:
+        agent_id: { type: string, pattern: "^[0-9]{3,}$" }
+    output_schema:
+      type: object
+      properties: { agent: { type: object }, found: { type: boolean } }
+  - id: wazuh.agent.list
+    title: List agents
+    description: List Wazuh agents, optionally filtered by status, group or name.
+    side_effect: read
+    risk: low
+    supports_dry_run: true
+    entrypoint: "actions/wazuh.py:agent_list"
+    params_schema:
+      type: object
+      additionalProperties: false
+      properties:
+        status: { type: string, enum: [active, disconnected, never_connected, pending] }
+        group: { type: string }
+        name: { type: string }
+        limit: { type: integer, minimum: 1, maximum: 10000 }
+    output_schema:
+      type: object
+      properties: { agents: { type: array }, total: { type: integer } }
+  - id: wazuh.agent.restart
+    title: Restart agent
+    description: Restart a Wazuh agent.
+    side_effect: write
+    risk: medium
+    supports_dry_run: true
+    entrypoint: "actions/wazuh.py:agent_restart"
+    params_schema:
+      type: object
+      additionalProperties: false
+      required: [agent_id]
+      properties:
+        agent_id: { type: string, pattern: "^[0-9]{3,}$" }
+  - id: wazuh.active_response.run
+    title: Run active response
+    description: Run an active-response command on agents, for example firewall-drop to block a source IP.
+    side_effect: write
+    risk: high
+    supports_dry_run: true
+    entrypoint: "actions/wazuh.py:active_response"
+    params_schema:
+      type: object
+      additionalProperties: false
+      required: [agent_ids, command]
+      properties:
+        agent_ids: { type: array, items: { type: string }, minItems: 1 }
+        command: { type: string, description: "active-response command name, e.g. firewall-drop" }
+        srcip: { type: string, format: ip }
+        arguments: { type: array, items: { type: string } }

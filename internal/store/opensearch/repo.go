@@ -357,3 +357,36 @@ func decodeWrite(out []byte) (store.Version, error) {
 	}
 	return w.version(), nil
 }
+
+// Count implements store.Counter with the _count API (filters only; sort and paging are ignored).
+func (r *Repo[T]) Count(ctx context.Context, q store.ListQuery) (int64, error) {
+	var filter []any
+	for field, vals := range q.Terms {
+		filter = append(filter, map[string]any{"terms": map[string]any{field: vals}})
+	}
+	for _, rg := range q.Ranges {
+		b := map[string]any{}
+		if rg.Gte != nil {
+			b["gte"] = rg.Gte
+		}
+		if rg.Lte != nil {
+			b["lte"] = rg.Lte
+		}
+		filter = append(filter, map[string]any{"range": map[string]any{rg.Field: b}})
+	}
+	query := map[string]any{"match_all": map[string]any{}}
+	if len(filter) > 0 {
+		query = map[string]any{"bool": map[string]any{"filter": filter}}
+	}
+	_, out, err := r.c.Do(ctx, http.MethodPost, "/"+r.alias+"/_count", map[string]any{"query": query})
+	if err != nil {
+		return 0, err
+	}
+	var cr struct {
+		Count int64 `json:"count"`
+	}
+	if err := json.Unmarshal(out, &cr); err != nil {
+		return 0, fmt.Errorf("opensearch: decode count: %w", err)
+	}
+	return cr.Count, nil
+}

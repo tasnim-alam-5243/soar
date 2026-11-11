@@ -1,0 +1,45 @@
+# Alerts of spec 8.9 and section 14. Route them with Alertmanager.
+groups:
+  - name: soar-queues
+    rules:
+      - alert: StreamAlmostFull
+        expr: soar_queue_fill_ratio > 0.7
+        for: 2m
+        annotations: { summary: "{{ $labels.stream }} is {{ $value | humanizePercentage }} full; at 100% ingest answers 503" }
+      - alert: EventsBacklogHigh
+        expr: soar_queue_pending{stream="EVENTS"} > 50000
+        for: 1m
+        annotations: { summary: "EVENTS backlog {{ $value }}: processors or OpenSearch are behind" }
+      - alert: EventsBacklogRising
+        expr: deriv(soar_queue_pending{stream="EVENTS"}[5m]) > 0 and soar_queue_pending{stream="EVENTS"} > 1000
+        for: 5m
+        annotations: { summary: "EVENTS backlog keeps growing" }
+      - alert: DeadLetters
+        expr: increase(soar_dlq_messages_total[5m]) > 0
+        annotations: { summary: "{{ $value }} message(s) moved to the DLQ from {{ $labels.origin }}; inspect GET /api/v1/dlq" }
+      - alert: IngestRejecting
+        expr: sum(rate(soar_source_events_total{result="rejected"}[5m])) / clamp_min(sum(rate(soar_source_events_total{result=~"accepted|rejected"}[5m])), 1) > 0.001
+        for: 2m
+        annotations: { summary: "ingest rejects more than 0.1% of events (queue full or NATS unavailable)" }
+      - alert: OutboxStuck
+        expr: soar_outbox_unpublished > 0
+        for: 1m
+        annotations: { summary: "{{ $value }} execution(s) have outbox entries unpublished for more than 10 s" }
+      - alert: TimerLag
+        expr: soar_timer_lag_seconds > 5
+        for: 1m
+        annotations: { summary: "timers fire {{ $value }}s late: is the scheduler leader healthy?" }
+  - name: soar-latency
+    rules:
+      - alert: IngestLatencyHigh
+        expr: histogram_quantile(0.99, sum by (le) (rate(soar_ingest_latency_seconds_bucket[5m]))) > 0.1
+        for: 5m
+        annotations: { summary: "p99 ingest latency {{ $value }}s exceeds the 100 ms target (spec 3.3)" }
+      - alert: ExecutionsFailing
+        expr: sum(rate(soar_executions_total{status=~"failed|timed_out"}[15m])) / clamp_min(sum(rate(soar_executions_total[15m])), 1e-9) > 0.2
+        for: 15m
+        annotations: { summary: "more than 20% of executions fail" }
+      - alert: OpenSearchConflictsHigh
+        expr: sum(rate(soar_os_write_conflicts_total[5m])) > 20
+        for: 10m
+        annotations: { summary: "frequent optimistic-concurrency conflicts; check orchestrator partitioning" }

@@ -1,0 +1,32 @@
+{
+  "timestamp": "2026-10-29T12:50:00.012+0600",
+  "rule": {
+    "level": 5,
+    "description": "Systemd: Service exited due to a failure.",
+    "id": "40704",
+    "firedtimes": 3,
+    "mail": false,
+    "groups": [
+      "local",
+      "systemd"
+    ]
+  },
+  "agent": {
+    "id": "001",
+    "name": "web01"
+  },
+  "manager": {
+    "name": "wazuh-manager"
+  },
+  "id": "1793256600.11800",
+  "decoder": {
+    "name": "systemd"
+  },
+  "location": "journald",
+  "full_log": "Oct 29 12:50:00 web01 systemd[1]: foo.service: Failed with result 'exit-code'.",
+  "predecoder": {
+    "program_name": "systemd",
+    "timestamp": "Oct 29 12:50:00",
+    "hostname": "web01"
+  }
+}

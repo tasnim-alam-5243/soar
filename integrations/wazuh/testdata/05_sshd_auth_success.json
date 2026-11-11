@@ -1,0 +1,51 @@
+{
+  "timestamp": "2026-10-29T12:51:41.200+0600",
+  "rule": {
+    "level": 3,
+    "description": "sshd: authentication success.",
+    "id": "5715",
+    "firedtimes": 4,
+    "mail": false,
+    "groups": [
+      "syslog",
+      "sshd",
+      "authentication_success"
+    ],
+    "mitre": {
+      "id": [
+        "T1078",
+        "T1021"
+      ],
+      "tactic": [
+        "Defense Evasion",
+        "Persistence",
+        "Privilege Escalation",
+        "Initial Access",
+        "Lateral Movement"
+      ],
+      "technique": [
+        "Valid Accounts",
+        "Remote Services"
+      ]
+    }
+  },
+  "agent": {
+    "id": "001",
+    "name": "web01"
+  },
+  "manager": {
+    "name": "wazuh-manager"
+  },
+  "id": "1793256701.12020",
+  "decoder": {
+    "name": "sshd",
+    "parent": "sshd"
+  },
+  "location": "/var/log/secure",
+  "full_log": "Oct 29 12:51:41 web01 sshd[2211]: Accepted password for root from 10.10.192.1 port 51234 ssh2",
+  "data": {
+    "srcip": "10.10.192.1",
+    "srcport": "51234",
+    "dstuser": "root"
+  }
+}

@@ -53,10 +53,6 @@ func unprocessable(errs []FieldError) *Problem {
 	return p
 }
 
-func notImplemented(what string) *Problem {
-	return newProblem(http.StatusNotImplemented, "not-implemented", "Not implemented yet", what)
-}
-
 func methodNotAllowed(allowed string) *Problem {
 	p := newProblem(http.StatusMethodNotAllowed, "method-not-allowed", "Method not allowed", "allowed: "+allowed)
 	p.header = http.Header{"Allow": {allowed}}

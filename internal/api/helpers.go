@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/yourorg/soar/internal/domain"
+	"github.com/yourorg/soar/internal/security"
 	"github.com/yourorg/soar/internal/store"
 )
 
@@ -32,6 +33,9 @@ func decode(r *http.Request, dst any) error {
 	}
 	if len(bytes.TrimSpace(b)) == 0 {
 		return badRequest("a JSON request body is required")
+	}
+	if d := security.JSONDepth(b); d > security.MaxJSONDepth {
+		return badRequest("JSON body nests %d levels deep; the limit is %d", d, security.MaxJSONDepth)
 	}
 	dec := json.NewDecoder(bytes.NewReader(b))
 	dec.DisallowUnknownFields()
@@ -258,7 +262,8 @@ func (i *idem) abort(r *http.Request) {
 // createResource implements POST for a collection with Idempotency-Key support.
 // collection is the path of the collection for the Location header ("" for none).
 func createResource[T any](s *Server, w http.ResponseWriter, r *http.Request, repo store.Repo[T], collection string,
-	build func() (T, string, error)) error {
+	build func() (T, string, error),
+) error {
 	ik, err := s.idemBegin(r)
 	if err != nil {
 		return err

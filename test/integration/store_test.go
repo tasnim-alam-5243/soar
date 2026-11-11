@@ -108,8 +108,10 @@ func TestBulkScriptedUpsertCountsOccurrences(t *testing.T) {
 	idx := st.Names.Index("alerts")
 
 	now := time.Now().UTC()
-	a := domain.Alert{Meta: domain.NewMeta(domain.PrefixAlert), Kind: "alert", SourceID: "wazuh-prod", Title: "ssh brute force",
-		Severity: 3, ReceivedAt: now, OccurrenceCount: 1, LastSeen: &now}
+	a := domain.Alert{
+		Meta: domain.NewMeta(domain.PrefixAlert), Kind: "alert", SourceID: "wazuh-prod", Title: "ssh brute force",
+		Severity: 3, ReceivedAt: now, OccurrenceCount: 1, LastSeen: &now,
+	}
 	upsert := func() store.BulkOp {
 		return store.BulkOp{Action: store.BulkUpdate, Index: idx, ID: "alt_fixed", Retries: 5, Body: map[string]any{
 			"script": map[string]any{

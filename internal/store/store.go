@@ -115,6 +115,7 @@ type Store struct {
 	Principals  Repo[domain.Principal]
 	Idempotency Repo[domain.Idempotency]
 	Timers      Repo[domain.Timer]
+	Approvals   Repo[domain.Approval]
 	Sources     Repo[domain.Source]
 	Mappings    Repo[domain.Mapping]
 	Filters     Repo[domain.FilterSet]
@@ -123,4 +124,19 @@ type Store struct {
 	Raw         Repo[domain.RawRecord]
 	Seen        Repo[domain.Seen]
 	Connections Repo[domain.Connection]
+}
+
+// Counter is implemented by repositories that can count matching documents without
+// fetching them (dashboards). Both the OpenSearch and the memory store implement it.
+type Counter interface {
+	Count(ctx context.Context, q ListQuery) (int64, error)
+}
+
+// Count counts documents of any repository that implements Counter.
+func Count[T any](ctx context.Context, r Repo[T], q ListQuery) (int64, error) {
+	c, ok := r.(Counter)
+	if !ok {
+		return 0, ErrUnsupported
+	}
+	return c.Count(ctx, q)
 }

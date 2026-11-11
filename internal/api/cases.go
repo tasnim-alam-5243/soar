@@ -1,8 +1,6 @@
 package api
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"net/http"
 	"strconv"
@@ -24,6 +22,7 @@ type caseIn struct {
 	Severity *int     `json:"severity"`
 	Assignee string   `json:"assignee"`
 	Tags     []string `json:"tags"`
+	AlertIDs []string `json:"alert_ids"`
 }
 
 func validateTags(v *verr, tags []string) {
@@ -45,6 +44,7 @@ func (s *Server) timeline(r *http.Request, subjectID, eventType string, data map
 
 func (s *Server) createCase(w http.ResponseWriter, r *http.Request) error {
 	var created domain.Case
+	var alertIDs []string
 	err := createResource(s, w, r, s.st.Cases, "/cases", func() (domain.Case, string, error) {
 		var in caseIn
 		if err := decode(r, &in); err != nil {
@@ -61,15 +61,32 @@ func (s *Server) createCase(w http.ResponseWriter, r *http.Request) error {
 		}
 		v.intRange("severity", sev, 1, 5)
 		validateTags(&v, in.Tags)
+		if len(in.AlertIDs) > 200 {
+			v.add("alert_ids", "at most 200 alerts")
+		}
+		for i, id := range in.AlertIDs {
+			if _, _, err := s.st.Alerts.Get(r.Context(), id); err != nil {
+				v.add("alert_ids["+itoa(i)+"]", "no such alert")
+			}
+		}
 		if err := v.err(); err != nil {
 			return domain.Case{}, "", err
 		}
-		created = domain.Case{Meta: domain.NewMeta(domain.PrefixCase), Title: in.Title, Summary: in.Summary, Status: "open",
-			Severity: sev, Assignee: in.Assignee, Tags: in.Tags}
+		alertIDs = in.AlertIDs
+		created = domain.Case{
+			Meta: domain.NewMeta(domain.PrefixCase), Title: in.Title, Summary: in.Summary, Status: "open",
+			Severity: sev, Assignee: in.Assignee, Tags: in.Tags, AlertIDs: in.AlertIDs,
+		}
 		return created, created.ID, nil
 	})
 	if err == nil && created.ID != "" { // not a replay: record the creation
 		s.timeline(r, created.ID, "case.created", map[string]any{"title": created.Title})
+		for _, aid := range alertIDs { // listed on the case already; now the snapshots
+			if lerr := s.cases.SnapshotAlert(r.Context(), created.ID, aid); lerr != nil {
+				s.log.WarnContext(r.Context(), "case created but an alert snapshot failed", "case", created.ID, "alert", aid, "error", lerr.Error())
+			}
+		}
+		s.notifyUI("cases", created.ID, map[string]any{"status": created.Status})
 	}
 	return err
 }
@@ -183,6 +200,7 @@ func (s *Server) patchCase(w http.ResponseWriter, r *http.Request) error {
 	}
 	if len(changed) > 0 {
 		s.timeline(r, doc.ID, "case.updated", map[string]any{"fields": strings.Join(changed, ",")})
+		s.notifyUI("cases", doc.ID, map[string]any{"status": doc.Status, "fields": changed})
 	}
 	return writeResource(w, http.StatusOK, doc, ver)
 }
@@ -213,8 +231,10 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request) error {
 		if err := v.err(); err != nil {
 			return domain.CaseTask{}, "", err
 		}
-		created = domain.CaseTask{Meta: domain.NewMeta(domain.PrefixTask), CaseID: caseID, Title: in.Title,
-			Description: in.Description, Status: "open", Assignee: in.Assignee, DueAt: in.DueAt}
+		created = domain.CaseTask{
+			Meta: domain.NewMeta(domain.PrefixTask), CaseID: caseID, Title: in.Title,
+			Description: in.Description, Status: "open", Assignee: in.Assignee, DueAt: in.DueAt,
+		}
 		return created, created.ID, nil
 	})
 	if err == nil && created.ID != "" {
@@ -257,12 +277,6 @@ func (s *Server) caseTimeline(w http.ResponseWriter, r *http.Request) error {
 	return writePage(w, page)
 }
 
-// observableID is deterministic, so the same indicator always maps to the same document.
-func observableID(typ, value string) string {
-	sum := sha256.Sum256([]byte(typ + "\x00" + strings.ToLower(strings.TrimSpace(value))))
-	return domain.PrefixObservable + "_" + hex.EncodeToString(sum[:16])
-}
-
 type caseObservableIn struct {
 	Type  string `json:"type"`
 	Value string `json:"value"`
@@ -289,7 +303,7 @@ func (s *Server) addCaseObservable(w http.ResponseWriter, r *http.Request) error
 	}
 
 	now := s.now()
-	id := observableID(in.Type, in.Value)
+	id := domain.ObservableID(in.Type, in.Value)
 	status := http.StatusOK
 	doc := domain.ObservableDoc{Meta: domain.Meta{ID: id}, Type: in.Type, Value: in.Value, FirstSeen: now, LastSeen: now, CaseIDs: []string{caseID}}
 	_, err := s.st.Observables.Create(ctx, doc)
