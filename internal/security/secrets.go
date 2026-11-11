@@ -317,7 +317,7 @@ func (s *SecretStore) Resolve(ctx context.Context, ref string) (string, error) {
 
 // ResolveFor resolves ref for one use (UseConnection, UseIngestAuth, UseWorkflow) by a
 // consumer described by attributes it cannot choose freely together: for a connection
-// its connector id, "connection:<name>" and "host:<host of its base URL>" (see
+// its connector id, "connection:<id>" and "host:<host>" when all its URLs share it (see
 // ConnectionConsumers); for ingest auth "ingest" and "source:<name>"; for workflow
 // parameters "workflows". An env: reference must fit the use, and a stored secret with a
 // scope is released only when one of its scope entries names one of the attributes.
@@ -354,20 +354,48 @@ func (s *SecretStore) Resolver() func(ref, use string, consumers ...string) (str
 }
 
 // ConnectionConsumers are the attributes a connection is known by when it asks for a
-// secret: its connector id (any connection of that kind), "connection:<name>" and,
-// when its configuration names a URL, "host:<host>". Scoping a secret to a host pins
-// it to that endpoint: a new connection pointing elsewhere cannot receive it, even
-// for the same connector.
+// secret: its connector id (any connection of that kind), "connection:<id>" (its
+// immutable id; names are not unique) and "host:<host>" when every URL in its
+// configuration is on that one host. Scoping a secret to a host pins it to that
+// endpoint: a connection pointing anywhere else, or at several hosts (whichever
+// key a connector reads, it could send the secret to another host), cannot receive it.
 func ConnectionConsumers(conn domain.Connection) []string {
-	out := []string{conn.ConnectorID, "connection:" + conn.Name}
-	for _, k := range []string{"base_url", "url", "endpoint"} {
-		raw, _ := conn.Config[k].(string)
-		if u, err := url.Parse(raw); err == nil && u.Hostname() != "" {
-			out = append(out, "host:"+strings.ToLower(u.Hostname()))
-			break
-		}
+	out := []string{conn.ConnectorID, "connection:" + conn.ID}
+	if h := soleHost(conn.Config); h != "" {
+		out = append(out, "host:"+h)
 	}
 	return out
+}
+
+// soleHost returns the host of the absolute http(s) URLs in v (searched through nested
+// maps and lists) when they all name the same one, otherwise "".
+func soleHost(v any) string {
+	hosts := map[string]bool{}
+	var walk func(any)
+	walk = func(x any) {
+		switch t := x.(type) {
+		case string:
+			if u, err := url.Parse(strings.TrimSpace(t)); err == nil && (u.Scheme == "http" || u.Scheme == "https") && u.Hostname() != "" {
+				hosts[strings.ToLower(u.Hostname())] = true
+			}
+		case map[string]any:
+			for _, e := range t {
+				walk(e)
+			}
+		case []any:
+			for _, e := range t {
+				walk(e)
+			}
+		}
+	}
+	walk(v)
+	if len(hosts) != 1 {
+		return ""
+	}
+	for h := range hosts {
+		return h
+	}
+	return ""
 }
 
 // ScopeAllows reports whether a secret's scope (comma-separated entries; empty =
@@ -388,7 +416,7 @@ func ScopeAllows(scope string, consumers ...string) bool {
 }
 
 // ValidScope reports whether scope is a comma-separated list of entries: a connector
-// id, "workflows", "ingest", "host:<name>", "connection:<name>" or "source:<name>".
+// id, "workflows", "ingest", "host:<name>", "connection:<connection id>" or "source:<name>".
 func ValidScope(scope string) bool {
 	if scope == "" {
 		return true

@@ -513,7 +513,7 @@ None open. Fixed on 2026-11-11 (1-2 found while writing this checklist, 3 by the
    same bulk request. Checked in Step 8.
 6. A connection could name any environment variable as a secret (`env:SOAR_MASTER_KEY`), so an engineer could have
    the worker send the master key to a server of their choice. Only `SOAR_SECRET_*` (and the documented ingest/indexer
-   prefixes) resolve now; secret scopes are enforced on every path (worker, collector, ingest), and `host:<name>`
+   prefixes) resolve now; secret scopes are enforced on every path (worker, collector, ingest), and `host:<name>` (all of a connection's URLs on that host) or `connection:<id>`
    scopes pin a credential to its endpoint. Checked in Step 9 (`make test-security`).
 7. Worker -> runner gRPC was always plain text. It is TLS/mTLS now; plain text needs the runner on the same host or
    `SOAR_RUNNER_INSECURE=true` (set by the dev stack).

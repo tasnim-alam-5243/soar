@@ -368,24 +368,34 @@ func TestHostPinnedSecretFollowsTheEndpointNotTheConnector(t *testing.T) {
 	if _, err := ss.Put(ctx, "iris_prod", "v-iris", "host:iris.example.com"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ss.Put(ctx, "by_name", "v-name", "connection:iris-prod"); err != nil {
+	if _, err := ss.Put(ctx, "by_id", "v-id", "connection:con_legit"); err != nil {
 		t.Fatal(err)
 	}
-	legit := domain.Connection{ConnectorID: "dfir_iris", Name: "iris-prod", Config: domain.JSON{"base_url": "https://IRIS.example.com:8443/"}}
-	rogue := domain.Connection{ConnectorID: "dfir_iris", Name: "iris-new", Config: domain.JSON{"base_url": "https://attacker.invalid"}}
+	legit := domain.Connection{Meta: domain.Meta{ID: "con_legit"}, ConnectorID: "dfir_iris", Name: "iris-prod", Config: domain.JSON{"base_url": "https://IRIS.example.com:8443/"}}
+	// same name as the legitimate connection (names are not unique), another host
+	rogue := domain.Connection{Meta: domain.Meta{ID: "con_rogue"}, ConnectorID: "dfir_iris", Name: "iris-prod", Config: domain.JSON{"base_url": "https://attacker.invalid"}}
+	// base_url on the pinned host, but another URL key a connector might use elsewhere
+	mixed := domain.Connection{Meta: domain.Meta{ID: "con_mixed"}, ConnectorID: "dfir_iris", Name: "iris-x",
+		Config: domain.JSON{"base_url": "https://iris.example.com", "options": map[string]any{"token_url": "https://attacker.invalid/token"}}}
 	if v, err := ss.ResolveFor(ctx, "iris_prod", UseConnection, ConnectionConsumers(legit)...); err != nil || v != "v-iris" {
 		t.Errorf("pinned host: %q %v", v, err)
 	}
 	if _, err := ss.ResolveFor(ctx, "iris_prod", UseConnection, ConnectionConsumers(rogue)...); err == nil {
 		t.Error("a connection on another host received the pinned secret")
 	}
-	if _, err := ss.ResolveFor(ctx, "by_name", UseConnection, ConnectionConsumers(rogue)...); err == nil {
-		t.Error("a connection with another name received a connection-scoped secret")
+	if _, err := ss.ResolveFor(ctx, "by_id", UseConnection, ConnectionConsumers(rogue)...); err == nil {
+		t.Error("a connection with the same name but another id received a connection-scoped secret")
+	}
+	if v, err := ss.ResolveFor(ctx, "by_id", UseConnection, ConnectionConsumers(legit)...); err != nil || v != "v-id" {
+		t.Errorf("connection id scope: %q %v", v, err)
+	}
+	if _, err := ss.ResolveFor(ctx, "iris_prod", UseConnection, ConnectionConsumers(mixed)...); err == nil {
+		t.Error("a connection with URLs on two hosts received a host-pinned secret")
 	}
 	if _, err := ss.Resolver()("iris_prod", UseConnection, ConnectionConsumers(rogue)...); err == nil {
 		t.Error("the collector's resolver must enforce scopes too")
 	}
-	for s, ok := range map[string]bool{"host:iris.example.com": true, "connection:iris-prod": true, "source:wazuh-prod,ingest": true, "host:": false, "nope:x": false} {
+	for s, ok := range map[string]bool{"host:iris.example.com": true, "connection:con_legit": true, "source:wazuh-prod,ingest": true, "host:": false, "nope:x": false} {
 		if ValidScope(s) != ok {
 			t.Errorf("ValidScope(%q) != %v", s, ok)
 		}

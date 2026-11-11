@@ -400,7 +400,7 @@ func (s *Server) putSecret(w http.ResponseWriter, r *http.Request) error {
 	v.maxLen("value", in.Value, 65536)
 	v.maxLen("scope", in.Scope, 200)
 	if !security.ValidScope(in.Scope) {
-		v.add("scope", "a comma-separated list of: a connector id, workflows, ingest, host:<name>, connection:<name>, source:<name> (empty: usable anywhere)")
+		v.add("scope", "a comma-separated list of: a connector id, workflows, ingest, host:<name>, connection:<connection id>, source:<name> (empty: usable anywhere)")
 	}
 	if err := v.err(); err != nil {
 		return err
