@@ -45,7 +45,10 @@ func TestEnvelopeEncryptionAndRotation(t *testing.T) {
 	if strings.Contains(raw.Ciphertext, "s3cr3t") || raw.WrappedKey == "" {
 		t.Fatal("not encrypted")
 	}
-	if v, err := ss.Resolve(ctx, "iris_token"); err != nil || v != "s3cr3t" {
+	if v, err := ss.ResolveFor(ctx, "iris_token", UseConnection, "iris"); err != nil || v != "s3cr3t" {
+		if _, err := ss.Resolve(ctx, "iris_token"); err == nil {
+			t.Fatal("a scoped secret must not resolve without a named use")
+		}
 		t.Fatalf("resolve: %q %v", v, err)
 	}
 
@@ -57,10 +60,10 @@ func TestEnvelopeEncryptionAndRotation(t *testing.T) {
 		t.Fatalf("rotate: %d %v", n, err)
 	}
 	only2, _ := NewKeyring("k2", key(2), nil)
-	if v, err := (&SecretStore{Repo: st.Secrets, Keys: only2}).Resolve(ctx, "iris_token"); err != nil || v != "s3cr3t" {
+	if v, err := (&SecretStore{Repo: st.Secrets, Keys: only2}).ResolveFor(ctx, "iris_token", UseConnection, "iris"); err != nil || v != "s3cr3t" {
 		t.Fatalf("after rotation the old key must not be needed: %q %v", v, err)
 	}
-	if _, err := (&SecretStore{Repo: st.Secrets, Keys: k1}).Resolve(ctx, "iris_token"); err == nil {
+	if _, err := (&SecretStore{Repo: st.Secrets, Keys: k1}).ResolveFor(ctx, "iris_token", UseConnection, "iris"); err == nil {
 		t.Fatal("decrypting with a missing key must fail")
 	}
 
@@ -349,6 +352,40 @@ func TestSecretScopes(t *testing.T) {
 		}
 	}
 	for s, ok := range map[string]bool{"": true, "dfir_iris": true, "dfir_iris,workflows": true, "Bad Scope": false, "x;y": false} {
+		if ValidScope(s) != ok {
+			t.Errorf("ValidScope(%q) != %v", s, ok)
+		}
+	}
+}
+
+// A secret pinned to a host reaches only connections whose URL is on that host: a new
+// connection of the same connector pointing elsewhere does not receive it.
+func TestHostPinnedSecretFollowsTheEndpointNotTheConnector(t *testing.T) {
+	ctx := context.Background()
+	st := memory.NewStore("soar")
+	keys, _ := NewKeyring("k1", make([]byte, 32), nil)
+	ss := &SecretStore{Repo: st.Secrets, Keys: keys}
+	if _, err := ss.Put(ctx, "iris_prod", "v-iris", "host:iris.example.com"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ss.Put(ctx, "by_name", "v-name", "connection:iris-prod"); err != nil {
+		t.Fatal(err)
+	}
+	legit := domain.Connection{ConnectorID: "dfir_iris", Name: "iris-prod", Config: domain.JSON{"base_url": "https://IRIS.example.com:8443/"}}
+	rogue := domain.Connection{ConnectorID: "dfir_iris", Name: "iris-new", Config: domain.JSON{"base_url": "https://attacker.invalid"}}
+	if v, err := ss.ResolveFor(ctx, "iris_prod", UseConnection, ConnectionConsumers(legit)...); err != nil || v != "v-iris" {
+		t.Errorf("pinned host: %q %v", v, err)
+	}
+	if _, err := ss.ResolveFor(ctx, "iris_prod", UseConnection, ConnectionConsumers(rogue)...); err == nil {
+		t.Error("a connection on another host received the pinned secret")
+	}
+	if _, err := ss.ResolveFor(ctx, "by_name", UseConnection, ConnectionConsumers(rogue)...); err == nil {
+		t.Error("a connection with another name received a connection-scoped secret")
+	}
+	if _, err := ss.Resolver()("iris_prod", UseConnection, ConnectionConsumers(rogue)...); err == nil {
+		t.Error("the collector's resolver must enforce scopes too")
+	}
+	for s, ok := range map[string]bool{"host:iris.example.com": true, "connection:iris-prod": true, "source:wazuh-prod,ingest": true, "host:": false, "nope:x": false} {
 		if ValidScope(s) != ok {
 			t.Errorf("ValidScope(%q) != %v", s, ok)
 		}

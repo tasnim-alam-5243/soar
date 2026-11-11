@@ -30,6 +30,7 @@ import (
 	"github.com/yourorg/soar/internal/ingest"
 	"github.com/yourorg/soar/internal/ingest/adapters"
 	"github.com/yourorg/soar/internal/queue"
+	"github.com/yourorg/soar/internal/security"
 	"github.com/yourorg/soar/internal/store"
 )
 
@@ -39,8 +40,8 @@ type Collector struct {
 	Q       ingest.Queue
 	St      *store.Store
 	Log     *slog.Logger
-	Secrets func(string) (string, error)
-	Owner   string // identifies this replica in leases
+	Secrets func(ref, use string, consumers ...string) (string, error) // security.SecretStore.Resolver
+	Owner   string                                                     // identifies this replica in leases
 	Now     func() time.Time
 
 	mu      sync.Mutex
@@ -162,7 +163,11 @@ func (c *Collector) state(ctx context.Context, rt *ingest.Runtime) (*sourceState
 		return s, nil
 	}
 	factory, _ := adapters.Get(rt.Source.Adapter)
-	poller, err := factory(rt.Source, conn, c.Secrets)
+	// the poller gets secrets for this connection only: env references must fit a
+	// connection and scoped secrets must name its connector, name or host
+	poller, err := factory(rt.Source, conn, func(ref string) (string, error) {
+		return c.Secrets(ref, security.UseConnection, security.ConnectionConsumers(conn)...)
+	})
 	if err != nil {
 		return nil, err
 	}

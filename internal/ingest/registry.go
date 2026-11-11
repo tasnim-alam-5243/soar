@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/yourorg/soar/internal/domain"
+	"github.com/yourorg/soar/internal/security"
 	"github.com/yourorg/soar/internal/store"
 )
 
@@ -63,7 +64,7 @@ type Registry struct {
 
 	st      *store.Store
 	log     *slog.Logger
-	secrets func(ref string) (string, error)
+	secrets func(ref, use string, consumers ...string) (string, error)
 
 	lists  *Lists
 	mu     sync.RWMutex
@@ -74,7 +75,8 @@ type Registry struct {
 }
 
 // NewRegistry builds an empty registry; call Refresh or Run to fill it.
-func NewRegistry(st *store.Store, log *slog.Logger, secrets func(string) (string, error)) *Registry {
+// secrets resolves a reference for a use and consumer (security.SecretStore.Resolver).
+func NewRegistry(st *store.Store, log *slog.Logger, secrets func(ref, use string, consumers ...string) (string, error)) *Registry {
 	return &Registry{
 		st: st, log: log, secrets: secrets, lists: &Lists{m: map[string]map[string]bool{}}, byName: map[string]*Runtime{},
 		failing: map[string]string{}, last: map[string]healthSample{},
@@ -170,7 +172,10 @@ func (r *Registry) Refresh(ctx context.Context) error {
 			if IsPush(s) {
 				// Only pushed data is authenticated on arrival; pull sources authenticate
 				// outbound through their connection (spec 9.5).
-				rt.Auth, err = NewAuthenticator(s.Auth, r.secrets)
+				name := s.Name
+				rt.Auth, err = NewAuthenticator(s.Auth, func(ref string) (string, error) {
+					return r.secrets(ref, security.UseIngestAuth, "ingest", "source:"+name)
+				})
 			}
 		}
 		if err == nil && s.RateLimit != nil {

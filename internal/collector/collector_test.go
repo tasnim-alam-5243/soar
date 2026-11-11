@@ -230,7 +230,7 @@ func newRig(t *testing.T) *rig {
 	if err := q.EnsureStreams(ctx, queue.StreamOptions{EventsMaxBytes: 256 << 20}); err != nil {
 		t.Fatal(err)
 	}
-	reg := ingest.NewRegistry(st, log, security.ResolveSecret)
+	reg := ingest.NewRegistry(st, log, (&security.SecretStore{}).Resolver())
 	reg.Serves = ingest.IsPull
 	if err := reg.Refresh(ctx); err != nil {
 		t.Fatal(err)
@@ -238,7 +238,7 @@ func newRig(t *testing.T) *rig {
 	cq := &countingQ{Queue: q}
 	return &rig{
 		t: t, idx: idx, st: st, q: q, cq: cq, reg: reg, srv: srv,
-		col: &Collector{Reg: reg, Q: cq, St: st, Log: log, Secrets: security.ResolveSecret, Owner: "collector-a"},
+		col: &Collector{Reg: reg, Q: cq, St: st, Log: log, Secrets: (&security.SecretStore{}).Resolver(), Owner: "collector-a"},
 	}
 }
 
@@ -313,7 +313,7 @@ func TestEachRoleLoadsOnlyItsOwnSources(t *testing.T) {
 	}
 	// ingest registry: the push source loads with its token; the pull source is skipped
 	t.Setenv("SOAR_SOURCE_TOKEN_WAZUH_PROD", "tok")
-	in := ingest.NewRegistry(r.st, slog.New(slog.NewTextHandler(io.Discard, nil)), security.ResolveSecret)
+	in := ingest.NewRegistry(r.st, slog.New(slog.NewTextHandler(io.Discard, nil)), (&security.SecretStore{}).Resolver())
 	in.Serves = ingest.IsPush
 	if err := in.Refresh(context.Background()); err != nil {
 		t.Fatal(err)
@@ -484,7 +484,7 @@ func TestCursorSurvivesARestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	c1 := r.cursor()
-	restarted := &Collector{Reg: r.reg, Q: r.q, St: r.st, Log: r.col.Log, Secrets: security.ResolveSecret, Owner: "collector-a"}
+	restarted := &Collector{Reg: r.reg, Q: r.q, St: r.st, Log: r.col.Log, Secrets: (&security.SecretStore{}).Resolver(), Owner: "collector-a"}
 	r.resetRequests()
 	if _, err := restarted.cycle(context.Background(), r.runtime(), time.Second); err != nil {
 		t.Fatal(err)
@@ -521,7 +521,7 @@ func TestSourceErrorsDoNotAdvanceTheCursor(t *testing.T) {
 func TestOnlyOneCollectorPollsASourceAtATime(t *testing.T) {
 	r := newRig(t)
 	r.idx.add(5, time.Now().Add(-5*time.Minute), time.Second, "l")
-	other := &Collector{Reg: r.reg, Q: r.q, St: r.st, Log: r.col.Log, Secrets: security.ResolveSecret, Owner: "collector-b"}
+	other := &Collector{Reg: r.reg, Q: r.q, St: r.st, Log: r.col.Log, Secrets: (&security.SecretStore{}).Resolver(), Owner: "collector-b"}
 	if _, err := r.cycle(); err != nil {
 		t.Fatal(err)
 	}
@@ -623,5 +623,35 @@ func TestLateArrivalDuringABurstIsPickedUp(t *testing.T) {
 	}
 	if r.queued() != 20+1+3000 {
 		t.Fatalf("the late record must arrive along with the burst, queue has %d (want %d)", r.queued(), 20+1+3000)
+	}
+}
+
+// The collector resolves a pull source's connection secrets for that connection only:
+// an ingest token variable or a secret pinned to another host is refused, so a source
+// cannot send them to the server it polls.
+func TestPullConnectionSecretsAreScopedToTheConnection(t *testing.T) {
+	r := newRig(t)
+	t.Setenv("SOAR_SOURCE_TOKEN_X", "ingest-token")
+	ctx := context.Background()
+	page, err := r.st.Connections.List(ctx, store.ListQuery{Limit: 5})
+	if err != nil || len(page.Items) != 1 {
+		t.Fatalf("connections: %v %v", page, err)
+	}
+	id := page.Items[0].ID
+	if _, _, err := r.st.Connections.Update(ctx, id, func(c *domain.Connection) error {
+		c.SecretRefs = domain.JSON{"username": "env:SOAR_SECRET_T_USER", "password": "env:SOAR_SOURCE_TOKEN_X"}
+		c.UpdatedAt = time.Now().Add(time.Second)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.col.cycle(ctx, r.runtime(), time.Second); err == nil || !strings.Contains(err.Error(), "not allowed") {
+		t.Fatalf("an ingest token must not be resolved for a pull connection, got %v", err)
+	}
+	r.idx.mu.Lock()
+	contacted := len(r.idx.requests)
+	r.idx.mu.Unlock()
+	if contacted != 0 {
+		t.Error("the indexer was contacted with a refused secret")
 	}
 }

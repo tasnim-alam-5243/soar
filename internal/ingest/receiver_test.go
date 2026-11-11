@@ -59,7 +59,7 @@ func newRig(t *testing.T, opts queue.StreamOptions) *rig {
 	if err := q.EnsureStreams(context.Background(), opts); err != nil {
 		t.Fatal(err)
 	}
-	reg := ingest.NewRegistry(st, log, security.ResolveSecret)
+	reg := ingest.NewRegistry(st, log, (&security.SecretStore{}).Resolver())
 	if err := reg.Refresh(context.Background()); err != nil {
 		t.Fatal(err)
 	}

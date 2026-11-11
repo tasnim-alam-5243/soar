@@ -536,7 +536,7 @@ func (w *Worker) connection(ctx context.Context, man actions.Manifest, name stri
 		if w.Secrets == nil {
 			return nil, actions.Errf("missing_secret", false, "no secret store is configured")
 		}
-		v, err := w.resolveSecret(ctx, r, security.UseConnection, c.ConnectorID)
+		v, err := w.resolveSecret(ctx, r, security.UseConnection, security.ConnectionConsumers(c)...)
 		if err != nil {
 			return nil, actions.Errf("missing_secret", false, "connection %q secret %q: %v", c.Name, key, err)
 		}
@@ -608,17 +608,22 @@ func ClassOf(m actions.Manifest) string {
 
 // scopedSecrets is the use-aware resolution of security.SecretStore.
 type scopedSecrets interface {
-	ResolveFor(ctx context.Context, ref, use, consumer string) (string, error)
+	ResolveFor(ctx context.Context, ref, use string, consumers ...string) (string, error)
 }
 
 // resolveSecret resolves ref for one use: env: references must fit the use and a
-// scoped secret must list the consumer (a connector id, or "workflows").
-func (w *Worker) resolveSecret(ctx context.Context, ref, use, consumer string) (string, error) {
+// scoped secret must list one of the consumer attributes (security.ConnectionConsumers,
+// or "workflows").
+func (w *Worker) resolveSecret(ctx context.Context, ref, use string, consumers ...string) (string, error) {
 	if s, ok := w.Secrets.(scopedSecrets); ok {
-		return s.ResolveFor(ctx, ref, use, consumer)
+		return s.ResolveFor(ctx, ref, use, consumers...)
 	}
 	if name, isEnv := strings.CutPrefix(ref, "env:"); isEnv && (use == security.UseWorkflow || !security.EnvRefAllowed(name, use)) {
 		return "", fmt.Errorf("secret reference %q is not allowed here", ref)
 	}
 	return w.Secrets.Resolve(ctx, ref)
 }
+
+// The worker relies on the secret store resolving with scopes; a signature change must not
+// silently fall back to Resolve.
+var _ scopedSecrets = (*security.SecretStore)(nil)

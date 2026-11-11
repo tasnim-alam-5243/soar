@@ -29,7 +29,7 @@ func Run(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	reg := NewRegistry(st, log, ss.ResolveFunc())
+	reg := NewRegistry(st, log, ss.Resolver())
 	reg.Serves = IsPush
 	rc := &Receiver{Reg: reg, Q: q, St: st, Log: log}
 	return service.RunRole(ctx, "ingest", cfg, log,

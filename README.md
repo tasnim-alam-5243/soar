@@ -385,8 +385,10 @@ limits throughput" and `make nats-relaxed`.
 * **Where secrets may come from:** `env:NAME` references reach only variables meant as integration secrets
   (`SOAR_SECRET_*` anywhere; `SOAR_WAZUH_INDEXER_*` for connections; `SOAR_SOURCE_TOKEN_*`/`SOAR_SOURCE_SECRET_*`
   for ingest auth), checked when a connection or source is saved and again at runtime, so a connection can never
-  read `SOAR_MASTER_KEY` or a platform password. A stored secret's `scope` (connector ids and/or `workflows`) limits
-  who may use it. Workflow parameters (`secrets.<name>`) use stored secrets only.
+  read `SOAR_MASTER_KEY` or a platform password. A stored secret's `scope` limits who may use it: `host:<name>` (only
+  connections whose URL is on that host; use it for credentials that matter), `connection:<name>`, a connector id,
+  `workflows`, `ingest` or `source:<name>`; scoped secrets resolve only for a named use (worker, collector, ingest).
+  Unscoped secrets can be bound by anyone allowed to create connections. Workflow parameters use stored secrets only.
 * **Worker to runner:** the channel carries decrypted secrets, so it is TLS (mTLS with `SOAR_RUNNER_CERT_FILE`)
   unless the runner is on the same host or `SOAR_RUNNER_INSECURE=true` says the network is private (the dev stack).
 * **Bootstrap key:** created once; restarting the api never re-enables a disabled bootstrap key or resets its roles.

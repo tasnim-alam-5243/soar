@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"regexp"
 	"strings"
@@ -296,21 +297,31 @@ func (s *SecretStore) forget(name string) {
 	s.mu.Unlock()
 }
 
-// Resolve returns the plaintext of a secret name or an allowed env: reference.
-// Values are cached briefly in memory to keep decryption off the hot path. Callers
-// that know what the value is for use ResolveFor, which also enforces scopes.
+// Resolve returns the plaintext of an unscoped secret name or an allowed env:
+// reference. A scoped secret is refused: whoever needs one must say what it is for
+// (ResolveFor), so no code path can skip the scope check by accident.
 func (s *SecretStore) Resolve(ctx context.Context, ref string) (string, error) {
 	if strings.HasPrefix(ref, "env:") {
 		return ResolveSecret(ref)
 	}
-	v, _, err := s.resolve(ctx, strings.TrimPrefix(ref, "secret:"))
-	return v, err
+	name := strings.TrimPrefix(ref, "secret:")
+	v, scope, err := s.resolve(ctx, name)
+	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(scope) != "" {
+		return "", fmt.Errorf("secret %q is scoped to %q; it can only be resolved for a named use", name, scope)
+	}
+	return v, nil
 }
 
-// ResolveFor is Resolve for one use (UseConnection, UseIngestAuth, UseWorkflow) by one
-// consumer (a connector id, or "workflows"): an env: reference must fit the use, and a
-// stored secret with a scope may only be used by a consumer its scope lists.
-func (s *SecretStore) ResolveFor(ctx context.Context, ref, use, consumer string) (string, error) {
+// ResolveFor resolves ref for one use (UseConnection, UseIngestAuth, UseWorkflow) by a
+// consumer described by attributes it cannot choose freely together: for a connection
+// its connector id, "connection:<name>" and "host:<host of its base URL>" (see
+// ConnectionConsumers); for ingest auth "ingest" and "source:<name>"; for workflow
+// parameters "workflows". An env: reference must fit the use, and a stored secret with a
+// scope is released only when one of its scope entries names one of the attributes.
+func (s *SecretStore) ResolveFor(ctx context.Context, ref, use string, consumers ...string) (string, error) {
 	if name, ok := strings.CutPrefix(ref, "env:"); ok {
 		if use == UseWorkflow || !EnvRefAllowed(name, use) {
 			rule := "workflow parameters can only use stored secrets"
@@ -326,27 +337,58 @@ func (s *SecretStore) ResolveFor(ctx context.Context, ref, use, consumer string)
 	if err != nil {
 		return "", err
 	}
-	if !ScopeAllows(scope, consumer) {
-		return "", fmt.Errorf("secret %q is scoped to %q and may not be used by %s", name, scope, consumer)
+	if !ScopeAllows(scope, consumers...) {
+		return "", fmt.Errorf("secret %q is scoped to %q and may not be used by %s", name, scope, strings.Join(consumers, ", "))
 	}
 	return v, nil
 }
 
-// ScopeAllows reports whether a secret's scope (comma-separated connector ids and/or
-// "workflows"; empty = anywhere) lets consumer use it.
-func ScopeAllows(scope, consumer string) bool {
+// Resolver returns ResolveFor as a function with its own timeout, for ingestion and
+// the collector.
+func (s *SecretStore) Resolver() func(ref, use string, consumers ...string) (string, error) {
+	return func(ref, use string, consumers ...string) (string, error) {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		return s.ResolveFor(ctx, ref, use, consumers...)
+	}
+}
+
+// ConnectionConsumers are the attributes a connection is known by when it asks for a
+// secret: its connector id (any connection of that kind), "connection:<name>" and,
+// when its configuration names a URL, "host:<host>". Scoping a secret to a host pins
+// it to that endpoint: a new connection pointing elsewhere cannot receive it, even
+// for the same connector.
+func ConnectionConsumers(conn domain.Connection) []string {
+	out := []string{conn.ConnectorID, "connection:" + conn.Name}
+	for _, k := range []string{"base_url", "url", "endpoint"} {
+		raw, _ := conn.Config[k].(string)
+		if u, err := url.Parse(raw); err == nil && u.Hostname() != "" {
+			out = append(out, "host:"+strings.ToLower(u.Hostname()))
+			break
+		}
+	}
+	return out
+}
+
+// ScopeAllows reports whether a secret's scope (comma-separated entries; empty =
+// anywhere) lists one of the consumer attributes.
+func ScopeAllows(scope string, consumers ...string) bool {
 	if strings.TrimSpace(scope) == "" {
 		return true
 	}
 	for _, s := range strings.Split(scope, ",") {
-		if strings.TrimSpace(s) == consumer {
-			return true
+		s = strings.TrimSpace(s)
+		for _, c := range consumers {
+			if c != "" && strings.EqualFold(s, c) {
+				return true
+			}
 		}
 	}
 	return false
 }
 
-// ValidScope reports whether scope is a comma-separated list of consumer names.
+// ValidScope reports whether scope is a comma-separated list of entries: a connector
+// id, "workflows", "ingest", "host:<name>", "connection:<name>" or "source:<name>".
 func ValidScope(scope string) bool {
 	if scope == "" {
 		return true
@@ -359,7 +401,7 @@ func ValidScope(scope string) bool {
 	return true
 }
 
-var scopeRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_.-]{0,99}$`)
+var scopeRe = regexp.MustCompile(`^((host|connection|source):[A-Za-z0-9_.-]{1,200}|[a-z0-9][a-z0-9_.-]{0,99})$`)
 
 func (s *SecretStore) resolve(ctx context.Context, name string) (value, scope string, err error) {
 	ttl := s.TTL
@@ -393,15 +435,6 @@ func (s *SecretStore) resolve(ctx context.Context, name string) (value, scope st
 	s.cache[name] = cached{value: v, scope: doc.Scope, until: s.now().Add(ttl)}
 	s.mu.Unlock()
 	return v, doc.Scope, nil
-}
-
-// ResolveFunc adapts Resolve to the func(ref) signature used by ingestion.
-func (s *SecretStore) ResolveFunc() func(string) (string, error) {
-	return func(ref string) (string, error) {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		return s.Resolve(ctx, ref)
-	}
 }
 
 // RotateAll re-wraps every secret not yet under the active master key and returns

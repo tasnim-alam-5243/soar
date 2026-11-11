@@ -30,9 +30,9 @@ func Run(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	reg := ingest.NewRegistry(st, log, ss.ResolveFunc())
+	reg := ingest.NewRegistry(st, log, ss.Resolver())
 	reg.Serves = ingest.IsPull
-	col := &Collector{Reg: reg, Q: q, St: st, Log: log, Secrets: ss.ResolveFunc(), Owner: host + "-" + domain.NewULID(time.Now())[:8]}
+	col := &Collector{Reg: reg, Q: q, St: st, Log: log, Secrets: ss.Resolver(), Owner: host + "-" + domain.NewULID(time.Now())[:8]}
 	return service.RunRole(ctx, "collector", cfg, log, func(*http.ServeMux, *opensearch.Client) {},
 		func(ctx context.Context) error { return reg.Run(ctx, 10*time.Second) },
 		func(ctx context.Context) error { return col.Run(ctx) },

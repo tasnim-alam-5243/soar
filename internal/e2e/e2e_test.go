@@ -93,7 +93,7 @@ func TestIngestToProcessorAt1000PerSecondLosesNothing(t *testing.T) {
 	if err := q.EnsureStreams(ctx, queue.StreamOptions{EventsMaxBytes: 512 << 20}); err != nil {
 		t.Fatal(err)
 	}
-	reg := ingest.NewRegistry(st, log, security.ResolveSecret)
+	reg := ingest.NewRegistry(st, log, (&security.SecretStore{}).Resolver())
 	if err := reg.Refresh(ctx); err != nil {
 		t.Fatal(err)
 	}
