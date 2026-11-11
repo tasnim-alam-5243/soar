@@ -410,6 +410,14 @@ func TestSoleHostFailsClosed(t *testing.T) {
 		want string
 	}{
 		{domain.JSON{"base_url": "https://IRIS.example.com:8443/api"}, "iris.example.com"},
+		{domain.JSON{"base_url": "http://iris.example.com"}, ""},
+		{domain.JSON{"base_url": "https://iris.example.com", "insecure_skip_verify": true}, ""},
+		{domain.JSON{"base_url": "https://iris.example.com", "insecure_skip_verify": false}, "iris.example.com"},
+		{domain.JSON{"base_url": "https://iris.example.com", "verify": false}, ""},
+		{domain.JSON{"base_url": "https://iris.example.com", "verify_ssl": true}, "iris.example.com"},
+		{domain.JSON{"base_url": "https://iris.example.com", "ca_file": "/tmp/evil-ca.pem"}, ""},
+		{domain.JSON{"base_url": "https://iris.example.com", "https_proxy": "https://iris.example.com:3128"}, ""},
+		{domain.JSON{"base_url": "https://iris.example.com", "client_cert_file": "/etc/soar/certs/c.pem"}, "iris.example.com"},
 		{domain.JSON{"base_url": "https://iris.example.com", "tenant": "acme", "timeout": 30}, "iris.example.com"},
 		{domain.JSON{"base_url": "https://iris.example.com", "host": "attacker.invalid"}, ""},
 		{domain.JSON{"base_url": "https://iris.example.com", "nested": map[string]any{"server": "attacker.invalid:443"}}, ""},
@@ -421,7 +429,7 @@ func TestSoleHostFailsClosed(t *testing.T) {
 		{domain.JSON{"base_url": "//attacker.invalid/x"}, ""},
 		{domain.JSON{"base_url": "https://iris.example.com.", "x": 1}, ""},
 		{domain.JSON{"base_url": "https://iris.example.com", "note": "see https://attacker.invalid/doc"}, ""},
-		{domain.JSON{"host": "iris.example.com", "port": 443}, "iris.example.com"},
+		{domain.JSON{"host": "iris.example.com", "port": 443}, "iris.example.com"}, // bare host: the connector decides the scheme
 		{domain.JSON{"timeout": 30}, ""},
 	} {
 		if got := soleHost(map[string]any(c.cfg)); got != c.want {

@@ -379,6 +379,10 @@ func soleHost(v any) string {
 	ok := true
 	var walk func(key string, x any)
 	walk = func(key string, x any) {
+		if weakensTransport(key, x) {
+			ok = false // a pinned host is only worth something over verified TLS
+			return
+		}
 		switch t := x.(type) {
 		case string:
 			urlish := strings.Contains(t, "://") || strings.HasPrefix(t, "//") || strings.Contains(t, `:\`)
@@ -439,8 +443,8 @@ func strictHost(s string, urlish bool) (string, bool) {
 		h, _, _ := strings.Cut(s, ":")
 		return h, true
 	}
-	if !strings.HasPrefix(s, "https://") && !strings.HasPrefix(s, "http://") {
-		return "", false
+	if !strings.HasPrefix(s, "https://") {
+		return "", false // plain http lets anyone on the path read the secret
 	}
 	u, err := url.Parse(s)
 	if err != nil || u.User != nil || u.Opaque != "" || u.Hostname() == "" {
@@ -564,4 +568,37 @@ func FromConfig(masterKeyID string, masterKey []byte, old map[string][]byte, rep
 	}
 	ss.Keys = k
 	return ss, nil
+}
+
+// weakensTransport reports whether a configuration entry changes who the connection
+// trusts or how it travels: verification switched off, a custom CA, or a proxy. Any of
+// them lets a pinned host's traffic be read on the way, so the host attribute is
+// withheld (fail closed; client certificates do not weaken anything and are allowed).
+func weakensTransport(key string, v any) bool {
+	k := strings.ToLower(key)
+	truthy := func() bool {
+		switch t := v.(type) {
+		case bool:
+			return t
+		case string:
+			s := strings.ToLower(strings.TrimSpace(t))
+			return s != "" && s != "false" && s != "0" && s != "no"
+		case float64:
+			return t != 0
+		case int:
+			return t != 0
+		}
+		return v != nil
+	}
+	switch {
+	case strings.Contains(k, "insecure"), strings.Contains(k, "skip_verify"), strings.Contains(k, "skipverify"):
+		return truthy()
+	case k == "verify" || strings.HasSuffix(k, "_verify") || strings.HasPrefix(k, "verify_"):
+		return !truthy() // verify: false
+	case strings.Contains(k, "proxy"), k == "ca", strings.HasPrefix(k, "ca_"), strings.HasSuffix(k, "_ca"),
+		strings.Contains(k, "cacert"), strings.Contains(k, "ca_cert"), strings.Contains(k, "ca_file"),
+		strings.Contains(k, "cafile"), strings.Contains(k, "ca_bundle"), strings.Contains(k, "root_ca"):
+		return truthy()
+	}
+	return false
 }
