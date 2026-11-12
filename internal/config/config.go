@@ -86,7 +86,8 @@ type Config struct {
 	ClientCertReq bool        // ServerTLS requires client certificates (mTLS)
 
 	// Step 10: ingest.
-	IngestDirs []string // directories file_object sources may read on the collector (none by default)
+	IngestDirs     []string // directories file_object sources may read on the collector (none by default)
+	StreamCertsDir string   // certificate/key files sources and connections may name (default /etc/soar/certs)
 }
 
 // ValidationError lists every invalid setting.
@@ -287,6 +288,16 @@ func Load(lookup func(string) (string, bool)) (Config, error) {
 		}
 		c.IngestDirs = append(c.IngestDirs, filepath.Clean(d))
 	}
+	// certificate and key files stream sources and connections may name (syslog tls_*_file,
+	// kafka ca_file); nothing outside it is read
+	c.StreamCertsDir = "/etc/soar/certs"
+	if v := get("SOAR_STREAM_CERTS_DIR"); v != "" {
+		if !filepath.IsAbs(v) || filepath.Clean(v) == "/" {
+			bad("SOAR_STREAM_CERTS_DIR: %q must be an absolute directory other than /", v)
+		} else {
+			c.StreamCertsDir = filepath.Clean(v)
+		}
+	}
 
 	// Step 9
 	c.MasterKeyID = get("SOAR_MASTER_KEY_ID")
@@ -397,6 +408,7 @@ func (c Config) LogValue() slog.Value {
 		slog.Any("worker_classes", c.WorkerClasses),
 		slog.Int("worker_concurrency", c.WorkerConcurrency),
 		slog.Any("ingest_dirs", c.IngestDirs),
+		slog.String("stream_certs_dir", c.StreamCertsDir),
 		slog.Bool("master_key", len(c.MasterKey) > 0),
 		slog.String("master_key_id", c.MasterKeyID),
 		slog.String("oidc_issuer", c.OIDCIssuer),

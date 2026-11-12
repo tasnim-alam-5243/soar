@@ -436,6 +436,11 @@ func TestSoleHostFailsClosed(t *testing.T) {
 		{domain.JSON{"host": "iris.example.com", "port": 443, "tls": true}, "iris.example.com"},
 		{domain.JSON{"host": "iris.example.com", "tls": "true"}, ""},
 		{domain.JSON{"host": "iris.example.com", "options": map[string]any{"tls": true}}, ""},
+		// only the exact key the connectors read: aliases leave a bare host unproven
+		{domain.JSON{"brokers": []any{"kafka.example.com:9093"}, "ssl": true}, ""},
+		{domain.JSON{"brokers": []any{"kafka.example.com:9093"}, "TLS": true}, ""},
+		{domain.JSON{"brokers": []any{"kafka.example.com:9093"}, "use_tls": true}, ""},
+		{domain.JSON{"brokers": []any{"kafka.example.com:9093"}, "tls": true, "TLS": false}, ""},
 		// Kafka: brokers are endpoints; a decoy URL cannot lend its host to them
 		{domain.JSON{"brokers": []any{"attacker.invalid:9092"}, "base_url": "https://iris.example.com", "tls": true}, ""},
 		{domain.JSON{"brokers": []any{"kafka.example.com:9093"}, "tls": true}, "kafka.example.com"},

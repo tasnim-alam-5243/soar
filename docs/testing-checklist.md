@@ -489,6 +489,9 @@ Gate: an analyst can run a playbook from the UI.
 ### Step 13 - Integrations
 Gate: a new SIEM source added with configuration only, in under an hour.
 - [ ] DFIR-IRIS 2.4.27: real service-account key; `POST /connections/{id}/test` is `ok: true`; then each `iris.*` action (all endpoints are marked *verify*).
+- [ ] Wazuh to IRIS end to end (`docs/wazuh-iris-guide.md`, sections 2 and 4): a level-10 Wazuh alert becomes an IRIS
+  alert with its IOCs and the agent asset; a level 5-7 alert is stored in SOAR only; a repeat within 10 minutes adds
+  no second IRIS alert.
 - [ ] Outlook: app registration with a certificate; connection test; `outlook.mail.search` on the shared mailbox; `delete`/`purge` and sends over 50 recipients ask for approval.
 - [ ] Wazuh manager actions (`wazuh.*`) against the real manager.
 - [ ] New source by configuration only: a mapping (`POST /mappings`) + a webhook source (`POST /sources`), test with `/sources/{id}/test`, then real pushes. Time it.

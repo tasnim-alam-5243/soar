@@ -9,23 +9,31 @@
 
 ## Push (v1)
 
-On the Wazuh manager:
+On the Wazuh manager (4.x; tested against the script's contract, Wazuh 4.14 layout):
 
 ```bash
 install -o root -g wazuh -m 750 push/custom-soar push/custom-soar.py /var/ossec/integrations/
 ```
 
+Inside `<ossec_config>` in `/var/ossec/etc/ossec.conf`:
+
 ```xml
 <integration>
   <name>custom-soar</name>
-  <hook_url>https://SOAR_HOST:8081/ingest/wazuh-prod</hook_url>
-  <level>3</level>   <!-- coarse; fine filtering happens in SOAR -->
-  <alert_format>json</alert_format>
+  <hook_url>http://SOAR_HOST:8081/ingest/wazuh-prod</hook_url>
   <api_key>VALUE OF SOAR_SOURCE_TOKEN_WAZUH_PROD</api_key>
+  <level>5</level>                       <!-- coarse; fine filtering happens in SOAR -->
+  <alert_format>json</alert_format>
+  <options>{"timeout": 5, "retries": 2}</options>
 </integration>
 ```
 
-Changing integration settings in Wazuh needs a manager restart; SOAR filter changes apply within seconds.
+Then `systemctl restart wazuh-manager`. The script logs failures (and, with `debug` in Wazuh's integrator
+debug mode, every delivery) to `/var/ossec/logs/integrations.log`; it retries a 429/5xx answer or a network error
+`retries` times (Wazuh itself never retries) and never logs the token. `<options>` also takes `backoff` (seconds,
+default 1) and `ca_file` (PEM CA for an `https://` hook_url). Optional `<rule_id>`, `<group>` and `<location>`
+elements narrow what Wazuh sends. Changing integration settings needs a manager restart; SOAR filter changes apply
+within seconds. Step-by-step with DFIR-IRIS: `docs/wazuh-iris-guide.md`.
 
 ## Pull (v1)
 

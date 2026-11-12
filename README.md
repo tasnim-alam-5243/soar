@@ -88,6 +88,7 @@ curl -s -H "Authorization: Bearer $SOAR_KEY" localhost:8080/api/v1/me | jq .
 | `SOAR_INTEGRATIONS_DIR` | no | built-in integration packages |
 | `SOAR_HTTP_ALLOW_LOOPBACK` | no | false (SSRF guard of http.request) |
 | `SOAR_INGEST_DIRS` | collector | none: comma-separated absolute directories `file:///` sources may read (and, with `after: delete`, empty) |
+| `SOAR_STREAM_CERTS_DIR` | collector | `/etc/soar/certs`: the only directory syslog `tls_*_file` and Kafka `ca_file` names are read from |
 
 ## Layout
 
@@ -202,6 +203,9 @@ Wazuh indexer <--poll-- collector -/                      \--> DLQ (poison messa
   each with a dry-run test endpoint. Mappings and filter sets are versioned and immutable.
 
 ### Wazuh quick start
+
+Step by step with a real Wazuh manager and DFIR-IRIS (ports, `ossec.conf`, conditions, first test):
+[docs/wazuh-iris-guide.md](docs/wazuh-iris-guide.md).
 
 ```bash
 make up                          # runs migrate (adds two index fields) and seed (installs the Wazuh pack)
@@ -439,8 +443,8 @@ survive restarts.
 
 | Adapter | Config | Notes |
 |---|---|---|
-| `syslog` | `listen` (`:5514`), `protocol` udp, tcp or tls (`tls_cert_file`, `tls_key_file`, `tls_client_ca_file` = mTLS), `max_message_bytes` (64 KiB), `batch_size`, `flush` | Use parser `syslog` (RFC 5424 and 3164). Runs on every collector replica; TCP framing by octet count or newline; TCP pauses the sender when the queue is full, UDP drops are counted. The dev compose publishes 5514 udp/tcp on 127.0.0.1. |
-| `kafka` | `config.connection` (connector `kafka`: `brokers`, `tls`, `ca_file`, `sasl` plain or scram-sha-256/512 with `secret_refs` username and password), `topics`, `group` (default `soar-<source>`), `start` latest or earliest, `max_batch` | Consumer group; offsets are committed only after the batch is queued; re-read records are deduplicated by topic/partition/offset. |
+| `syslog` | `listen` (`:5514`), `protocol` udp, tcp or tls (`tls_cert_file`, `tls_key_file`, `tls_client_ca_file` = mTLS: names of files in `SOAR_STREAM_CERTS_DIR`), `max_message_bytes` (64 KiB), `batch_size`, `flush` | Use parser `syslog` (RFC 5424 and 3164). Runs on every collector replica; TCP framing by octet count or newline; TCP pauses the sender when the queue is full, UDP drops are counted. The dev compose publishes 5514 udp/tcp on 127.0.0.1. |
+| `kafka` | `config.connection` (connector `kafka`: `brokers`, `tls` (true: exactly this key, a boolean), `ca_file` (a file in `SOAR_STREAM_CERTS_DIR`), `sasl` plain or scram-sha-256/512 with `secret_refs` username and password), `topics`, `group` (default `soar-<source>`), `start` latest or earliest, `max_batch` | Consumer group; offsets are committed only after the batch is queued; re-read records are deduplicated by topic/partition/offset. |
 | `file_object` | `url` `s3://bucket/prefix` (`config.connection` with `endpoint`, `region`, `secret_refs` access_key and secret_key) or `file:///dir`; `after` keep or delete; `max_object_bytes` (64 MiB); `settle` (10 s); needs a `schedule` | One collector replica (lease). `keep` remembers the last key (write keys in increasing order); `delete` removes each object once queued. Local directories must be inside `SOAR_INGEST_DIRS` on the collector. |
 
 ## Step 11: cases and observables
@@ -468,6 +472,10 @@ modules run by the runner. Each package has a `<name>.connection.test` action, r
 * **DFIR-IRIS 2.4.27** (`dfir_iris`): cases, alerts, IOCs, assets, notes, timeline events, tasks, alert merge.
   Endpoint paths per API generation in `integrations/dfir_iris/actions/endpoints.yaml` (`legacy_2_4`); IOC
   types, TLP levels, asset types and users resolved by name. *Verify every endpoint against your instance.*
+  `iris.alert.create` attaches IOCs and assets (unknown type names are skipped and reported) and the event time.
+  Connection `verify_tls: false` accepts a self-signed IRIS certificate (lab only; logs a warning on every call,
+  host-pinned secrets refused). Wazuh to IRIS end to end: `docs/wazuh-iris-guide.md` and
+  `examples/workflows/wazuh_to_iris.yaml` (Wazuh alerts above level 7 become IRIS alerts).
 * **Microsoft 365 mail** (`outlook`): get, search (one or many mailboxes, per-run cap), get_attachment,
   mark_read, move, reply, send (at-most-once, batches, approval above 50 recipients), delete and purge
   (destructive, approval by default). `mailbox_scope` allow/deny lists on the connection. Certificate or

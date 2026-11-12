@@ -52,7 +52,7 @@ func (c *Collector) runStream(ctx context.Context, rt *ingest.Runtime, spec adap
 func (c *Collector) streamOnce(ctx context.Context, rt *ingest.Runtime, spec adapters.StreamSpec, log *slog.Logger) error {
 	sctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	deps := adapters.StreamDeps{Log: log, Now: c.now, LocalDirs: c.Dirs}
+	deps := adapters.StreamDeps{Log: log, Now: c.now, LocalDirs: c.Dirs, CertDir: c.CertDir}
 	if name, _ := rt.Source.Config["connection"].(string); name != "" || spec.NeedsConnection {
 		conn, err := c.connection(ctx, rt)
 		if err != nil {

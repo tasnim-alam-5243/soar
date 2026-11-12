@@ -376,9 +376,10 @@ func ConnectionConsumers(conn domain.Connection) []string {
 // elsewhere) withholds the attribute, so a host-pinned secret is refused.
 //
 // A bare host[:port] (Kafka brokers, a "host" key) carries no scheme: the connector
-// decides how it travels, so it counts only when the configuration says tls: true at
-// its top level (a boolean, as connectors read it). Any value shaped like host:port
-// counts as an endpoint whatever its key.
+// decides how it travels, so it counts only when the configuration says exactly
+// "tls": true at its top level (the key and boolean type connectors read; aliases such
+// as ssl or TLS do not count, and set to false they withhold the host). Any value
+// shaped like host:port counts as an endpoint whatever its key.
 func soleHost(v any) string {
 	hosts := map[string]bool{}
 	ok := true
@@ -391,7 +392,9 @@ func soleHost(v any) string {
 		}
 		switch t := x.(type) {
 		case bool:
-			if depth == 1 && t && tlsKey(key) {
+			// only the exact key connectors read turns TLS on; an alias (ssl, TLS,
+			// use_tls, ...) a connector may ignore leaves the bare host unproven
+			if depth == 1 && t && key == "tls" {
 				tlsOn = true
 			}
 		case string:

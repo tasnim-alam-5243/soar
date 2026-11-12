@@ -44,6 +44,7 @@ type Collector struct {
 	Owner   string                                                     // identifies this replica in leases
 	Now     func() time.Time
 	Dirs    []string // local directories file_object sources may read (SOAR_INGEST_DIRS)
+	CertDir string   // certificate files sources and connections may name (SOAR_STREAM_CERTS_DIR)
 
 	mu      sync.Mutex
 	running map[string]*worker

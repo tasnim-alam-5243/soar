@@ -56,14 +56,20 @@ class HTTP:
     def __init__(self, base_url: str = "", headers: Optional[Dict[str, str]] = None,
                  egress: Optional[List[str]] = None, timeout: float = 30.0,
                  ca_pem: Optional[str] = None,
-                 log: Optional[Callable[[str], None]] = None):
+                 log: Optional[Callable[[str], None]] = None,
+                 verify_tls: bool = True):
         self.base_url = base_url.rstrip("/")
         self.headers = dict(headers or {})
         self.egress = egress or ["*"]
         self.timeout = timeout
         self.log = log or (lambda _m: None)
-        # Certificates are always verified; a private CA is supplied as ca_pem.
+        self.verify_tls = verify_tls
+        # Certificates are verified unless the connection says verify_tls: false (lab use: a
+        # self-signed server certificate); a private CA is supplied as ca_pem.
         self._ssl = ssl.create_default_context(cadata=ca_pem) if ca_pem else ssl.create_default_context()
+        if not verify_tls:
+            self._ssl.check_hostname = False
+            self._ssl.verify_mode = ssl.CERT_NONE
 
     def _allowed(self, host: str) -> bool:
         return any(p == "*" or fnmatch.fnmatch(host.lower(), p.lower()) for p in self.egress)
@@ -79,6 +85,8 @@ class HTTP:
         host = urllib.parse.urlparse(url).hostname or ""
         if not self._allowed(host):
             raise ActionError("egress_denied", f"{host} is not in this action's egress allowlist")
+        if not self.verify_tls and url.startswith("https://"):
+            self.log(f"WARNING: TLS certificate of {host} is not verified (connection verify_tls: false)")
         h = dict(self.headers)
         h.update(headers or {})
         body = data
@@ -176,6 +184,9 @@ class ActionContext:
             h["Authorization"] = "Basic " + base64.b64encode(f"{user}:{pw}".encode()).decode()
         elif auth == "api_key_header":
             h[cfg.get("api_key_header", "X-API-Key")] = self.secret(cfg.get("token_secret", "api_key"))
+        verify = cfg.get("verify_tls", True)
+        if isinstance(verify, str):
+            verify = verify.strip().lower() not in ("false", "0", "no", "off")
         return HTTP(base_url or cfg.get("base_url", ""), headers=h, egress=self.egress,
                     timeout=min(self.remaining(), float(cfg.get("timeout_s", 30))),
-                    ca_pem=cfg.get("ca_pem"), log=self._log)
+                    ca_pem=cfg.get("ca_pem"), log=self._log, verify_tls=bool(verify))

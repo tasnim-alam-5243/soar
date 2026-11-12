@@ -53,6 +53,15 @@ func TestHelpers(t *testing.T) {
 		{`in_list(raw.rule.id, "noisy")`, true},
 		{`in_list(raw.agent.name, "noisy")`, false},
 		{`in_list(raw.rule.level, "noisy")`, false},
+		// the in operator: the managed-list function in_list must not shadow it (CEL's
+		// list-membership overload has the same id, "in_list")
+		{`raw.rule.id in ["5715", "5501"]`, true},
+		{`raw.agent.name in ["db01"]`, false},
+		{`"sshd" in raw.rule.groups`, true},
+		{`3 in [1, 2, 3]`, true},
+		{`int(raw.rule.level) in [1, 2]`, false},
+		{`"a" in {"a": 1}`, true},
+		{`raw.rule.id in ["5715"] && in_list(raw.rule.id, "noisy")`, true},
 		{`raw.rule.description.matches("(?i)authentication")`, true},
 		{`level_map(raw.rule.level, [[0,3,1],[4,6,2],[7,9,3]])`, int64(1)},
 		{`level_map(7, [[0,3,1],[4,6,2],[7,9,3]])`, int64(3)},

@@ -31,6 +31,7 @@ class CaseSystem:
         self.http = ctx.http(auth="bearer")
         self.ctx = ctx
         self.customer = int(ctx.connection.get("customer_id", 1))
+        self._lists = {}  # id lists (IOC types, TLPs, asset types) fetched once per action
 
     def call(self, name, case_id=None, body=None, **path):
         e = self.ep[name]
@@ -43,7 +44,9 @@ class CaseSystem:
         return data.get("data", data)
 
     def lookup(self, name, key, want, id_key):
-        items = self.call(name)
+        if name not in self._lists:
+            self._lists[name] = self.call(name)
+        items = self._lists[name]
         if isinstance(items, dict):
             items = items.get(name) or list(items.values())
         for it in items or []:
@@ -112,19 +115,51 @@ def alert_create(ctx):
     if ctx.dry_run:
         return {"dry_run": True, "would_create": title}
     iris = CaseSystem(ctx)
+    tags = [t for t in dict.fromkeys(str(x) for x in (ctx.param("tags", []) or [])) if t and "," not in t]
     body = {"alert_title": title, "alert_description": ctx.param("description", ""), "alert_source": ctx.param("source", "SOAR"),
             "alert_source_ref": ctx.param("source_ref", ""), "alert_severity_id": SEVERITY.get(int(ctx.param("severity", 3)), 4),
             "alert_status_id": 2, "alert_customer_id": iris.customer, "alert_source_content": ctx.param("source_content", {}),
-            "alert_tags": ",".join(ctx.param("tags", [])), "alert_source_event_time": datetime.now(timezone.utc).isoformat()}
+            "alert_tags": ",".join(tags),
+            "alert_source_event_time": ctx.param("event_time") or datetime.now(timezone.utc).isoformat()}
+    if ctx.param("note"):
+        body["alert_note"] = ctx.param("note")
+    # an unknown IOC or asset type is reported, not fatal: the alert itself matters most
+    skipped = []
     iocs = []
     for i in ctx.param("iocs", []) or []:
+        if not i.get("value"):
+            continue
         t = _ioc_type(i.get("type", ""), i.get("value", ""))
-        iocs.append({"ioc_value": i.get("value"), "ioc_type_id": iris.lookup("ioc_types", "type_name", t, "type_id"),
-                     "ioc_tlp_id": iris.lookup("tlp_list", "tlp_name", i.get("tlp", "amber"), "tlp_id"), "ioc_description": i.get("description", "")})
+        try:
+            iocs.append({"ioc_value": i.get("value"), "ioc_type_id": iris.lookup("ioc_types", "type_name", t, "type_id"),
+                         "ioc_tlp_id": iris.lookup("tlp_list", "tlp_name", i.get("tlp", "amber"), "tlp_id"),
+                         "ioc_description": i.get("description", ""), "ioc_tags": ""})
+        except ActionError as e:
+            if e.code != "not_found":
+                raise
+            skipped.append(f"ioc {i.get('value')}: {e.message}")
     if iocs:
         body["alert_iocs"] = iocs
+    assets = []
+    for a in ctx.param("assets", []) or []:
+        if not a.get("name"):
+            continue
+        try:
+            assets.append({"asset_name": a["name"], "asset_type_id": iris.lookup("asset_types", "asset_name", a.get("type") or "Windows - Computer", "asset_id"),
+                           "asset_ip": a.get("ip", ""), "asset_description": a.get("description", ""), "asset_tags": ""})
+        except ActionError as e:
+            if e.code != "not_found":
+                raise
+            skipped.append(f"asset {a['name']}: {e.message}")
+    if assets:
+        body["alert_assets"] = assets
+    for s in skipped:
+        ctx.log("skipped " + s)
     data = iris.call("alert_create", body=body)
-    return {"alert_id": data.get("alert_id"), "iocs": len(iocs)}
+    out = {"alert_id": data.get("alert_id"), "iocs": len(iocs), "assets": len(assets)}
+    if skipped:
+        out["skipped"] = skipped
+    return out
 
 
 def alert_update(ctx):

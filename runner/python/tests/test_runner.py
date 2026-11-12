@@ -79,7 +79,14 @@ def test_cpu_limit_is_a_cpu_time_budget(svc):
 
 def test_memory_limit(svc):
     _, final = call(svc, "demo.hog", memory=128, timeout=20)
-    assert final.failure.code in ("memory_limit", "runner_crash")
+    assert final.failure.code == "memory_limit", final
+
+
+def test_memory_budget_excludes_the_interpreter(svc):
+    # the smallest budget still runs a light action, on any host: the interpreter's own
+    # address space (a 220 MB locale archive on RHEL) is not counted against it
+    _, final = call(svc, "demo.echo", {"a": 1}, memory=64)
+    assert final.WhichOneof("event") == "result", final
 
 
 def test_secrets_are_scrubbed(svc):

@@ -6,7 +6,6 @@ import (
 	"crypto/x509"
 	"fmt"
 	"log/slog"
-	"os"
 	"strings"
 	"time"
 
@@ -27,7 +26,7 @@ func init() {
 // deduplicated by the queue.
 //
 // Connection (connector "kafka"): config.brokers (list or "a:9092,b:9092"), config.tls
-// (bool), config.ca_file (private CA), config.sasl (plain, scram-sha-256,
+// (bool), config.ca_file (private CA, a file in SOAR_STREAM_CERTS_DIR), config.sasl (plain, scram-sha-256,
 // scram-sha-512) with secret_refs username and password.
 // Source config: topics (list, required), group (default "soar-<source>"),
 // start: latest | earliest (where a new group begins; default latest), max_batch: 500.
@@ -38,6 +37,7 @@ type kafkaStream struct {
 	start    string
 	maxBatch int
 	conn     *domain.Connection
+	certDir  string // SOAR_STREAM_CERTS_DIR: where ca_file must be
 	resolve  func(string) (string, error)
 	log      *slog.Logger
 }
@@ -93,7 +93,7 @@ func (k *kafkaStream) options() ([]kgo.Opt, error) {
 	if useTLS, _ := cfg["tls"].(bool); useTLS {
 		tc := &tls.Config{MinVersion: tls.VersionTLS12}
 		if ca, _ := cfg["ca_file"].(string); ca != "" {
-			pem, err := os.ReadFile(ca)
+			pem, err := readCertFile(k.certDir, ca) // fails without a certificate directory
 			if err != nil {
 				return nil, fmt.Errorf("connection %q: ca_file: %w", k.conn.Name, err)
 			}

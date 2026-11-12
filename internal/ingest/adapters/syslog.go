@@ -10,7 +10,6 @@ import (
 	"io"
 	"log/slog"
 	"net"
-	"os"
 	"strconv"
 	"sync"
 	"time"
@@ -28,7 +27,7 @@ func init() {
 //
 //	listen: "0.0.0.0:5514"        required
 //	protocol: udp | tcp | tls     default udp
-//	tls_cert_file, tls_key_file   required for tls
+//	tls_cert_file, tls_key_file   required for tls; files in SOAR_STREAM_CERTS_DIR
 //	tls_client_ca_file            tls: require client certificates signed by this CA
 //	max_message_bytes: 65536      longer messages are dropped (and counted)
 //	batch_size: 256, flush: 200ms
@@ -41,6 +40,9 @@ type syslogStream struct {
 	listen   string
 	protocol string
 	tls      *tls.Config
+	certFile string // tls: names in the certificate directory (SOAR_STREAM_CERTS_DIR)
+	keyFile  string
+	caFile   string
 	maxBytes int
 	batch    int
 	flush    time.Duration
@@ -70,26 +72,17 @@ func newSyslog(src domain.Source, deps StreamDeps) (Stream, error) {
 	switch s.protocol {
 	case "udp", "tcp":
 	case "tls":
-		cert, _ := cfg["tls_cert_file"].(string)
-		key, _ := cfg["tls_key_file"].(string)
-		if cert == "" || key == "" {
-			return nil, fmt.Errorf("protocol tls needs config.tls_cert_file and config.tls_key_file")
+		s.certFile, _ = cfg["tls_cert_file"].(string)
+		s.keyFile, _ = cfg["tls_key_file"].(string)
+		s.caFile, _ = cfg["tls_client_ca_file"].(string)
+		if s.certFile == "" || s.keyFile == "" {
+			return nil, fmt.Errorf("protocol tls needs config.tls_cert_file and config.tls_key_file (files in SOAR_STREAM_CERTS_DIR)")
 		}
-		pair, err := tls.LoadX509KeyPair(cert, key)
-		if err != nil {
-			return nil, fmt.Errorf("syslog tls certificate: %w", err)
-		}
-		s.tls = &tls.Config{Certificates: []tls.Certificate{pair}, MinVersion: tls.VersionTLS12}
-		if ca, _ := cfg["tls_client_ca_file"].(string); ca != "" {
-			pem, err := os.ReadFile(ca)
-			if err != nil {
-				return nil, fmt.Errorf("config.tls_client_ca_file: %w", err)
+		// the files are read only by the collector, from its certificate directory
+		if deps.CertDir != "" {
+			if err := s.loadTLS(deps.CertDir); err != nil {
+				return nil, err
 			}
-			pool := x509.NewCertPool()
-			if !pool.AppendCertsFromPEM(pem) {
-				return nil, fmt.Errorf("config.tls_client_ca_file has no PEM certificate")
-			}
-			s.tls.ClientCAs, s.tls.ClientAuth = pool, tls.RequireAndVerifyClientCert
 		}
 	default:
 		return nil, fmt.Errorf("config.protocol must be udp, tcp or tls, got %q", s.protocol)
@@ -108,6 +101,35 @@ func newSyslog(src domain.Source, deps StreamDeps) (Stream, error) {
 		s.flush = d
 	}
 	return s, nil
+}
+
+// loadTLS builds the listener's TLS settings from files in the certificate directory.
+func (s *syslogStream) loadTLS(dir string) error {
+	certPEM, err := readCertFile(dir, s.certFile)
+	if err != nil {
+		return fmt.Errorf("config.tls_cert_file: %w", err)
+	}
+	keyPEM, err := readCertFile(dir, s.keyFile)
+	if err != nil {
+		return fmt.Errorf("config.tls_key_file: %w", err)
+	}
+	pair, err := tls.X509KeyPair(certPEM, keyPEM)
+	if err != nil {
+		return errors.New("config.tls_cert_file and tls_key_file are not a matching PEM certificate and key")
+	}
+	s.tls = &tls.Config{Certificates: []tls.Certificate{pair}, MinVersion: tls.VersionTLS12}
+	if s.caFile != "" {
+		pem, err := readCertFile(dir, s.caFile)
+		if err != nil {
+			return fmt.Errorf("config.tls_client_ca_file: %w", err)
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(pem) {
+			return errors.New("config.tls_client_ca_file has no PEM certificate")
+		}
+		s.tls.ClientCAs, s.tls.ClientAuth = pool, tls.RequireAndVerifyClientCert
+	}
+	return nil
 }
 
 // Addr is the bound address once the listener is up (tests listen on port 0).
@@ -131,6 +153,9 @@ func (s *syslogStream) bound(a net.Addr) {
 }
 
 func (s *syslogStream) Run(ctx context.Context, emit Emit) error {
+	if s.protocol == "tls" && s.tls == nil {
+		return errors.New("syslog tls: the certificate files were not loaded (no SOAR_STREAM_CERTS_DIR)")
+	}
 	if s.protocol == "udp" {
 		return s.runUDP(ctx, emit)
 	}

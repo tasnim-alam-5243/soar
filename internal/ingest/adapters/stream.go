@@ -2,8 +2,13 @@ package adapters
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/yourorg/soar/internal/domain"
@@ -53,6 +58,37 @@ type StreamDeps struct {
 	// LocalDirs are the directories (and their subdirectories) a stream may read from
 	// the collector's own disk (SOAR_INGEST_DIRS); empty allows none.
 	LocalDirs []string
+	// CertDir holds the certificate and key files sources and connections may name
+	// (SOAR_STREAM_CERTS_DIR). Empty when the API only validates: nothing is read then.
+	CertDir string
+}
+
+// readCertFile reads a certificate or key file named by a source or connection: a name
+// inside CertDir, or an absolute path inside it. The read goes through os.Root, so a link
+// cannot lead out of the directory, and the error does not tell a missing file from an
+// unreadable one.
+func readCertFile(dir, name string) ([]byte, error) {
+	if dir == "" {
+		return nil, errors.New("no certificate directory is configured (SOAR_STREAM_CERTS_DIR)")
+	}
+	rel := name
+	if filepath.IsAbs(name) {
+		r, err := filepath.Rel(filepath.Clean(dir), filepath.Clean(name))
+		if err != nil || r == ".." || strings.HasPrefix(r, ".."+string(filepath.Separator)) {
+			return nil, fmt.Errorf("%s must be a file in %s (SOAR_STREAM_CERTS_DIR)", name, dir)
+		}
+		rel = r
+	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return nil, fmt.Errorf("the certificate directory %s cannot be opened", dir)
+	}
+	defer root.Close()
+	b, err := root.ReadFile(rel)
+	if err != nil {
+		return nil, fmt.Errorf("%s is not a readable file in %s (SOAR_STREAM_CERTS_DIR)", name, dir)
+	}
+	return b, nil
 }
 
 // StreamSpec registers a stream transport.

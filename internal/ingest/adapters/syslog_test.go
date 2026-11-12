@@ -10,6 +10,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -49,10 +50,14 @@ func (c *collect) bodies() []string {
 	return out
 }
 
-func startSyslog(t *testing.T, cfg map[string]any, c *collect) net.Addr {
+func startSyslog(t *testing.T, cfg map[string]any, c *collect, certDir ...string) net.Addr {
 	t.Helper()
 	cfg["flush"] = "20ms"
-	st, err := newSyslog(domain.Source{Name: "sys", Config: cfg}, StreamDeps{})
+	deps := StreamDeps{}
+	if len(certDir) > 0 {
+		deps.CertDir = certDir[0]
+	}
+	st, err := newSyslog(domain.Source{Name: "sys", Config: cfg}, deps)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -140,8 +145,8 @@ func TestSyslogTLSRequiresAClientCertificate(t *testing.T) {
 	c := &collect{}
 	addr := startSyslog(t, map[string]any{
 		"listen": "127.0.0.1:0", "protocol": "tls",
-		"tls_cert_file": f.ServerCert, "tls_key_file": f.ServerKey, "tls_client_ca_file": f.CA,
-	}, c)
+		"tls_cert_file": f.ServerCert, "tls_key_file": f.ServerKey, "tls_client_ca_file": filepath.Base(f.CA),
+	}, c, filepath.Dir(f.ServerCert))
 	pem, _ := os.ReadFile(f.CA)
 	pool := x509.NewCertPool()
 	pool.AppendCertsFromPEM(pem)
@@ -169,15 +174,63 @@ func TestSyslogTLSRequiresAClientCertificate(t *testing.T) {
 
 func TestSyslogConfigValidation(t *testing.T) {
 	for name, cfg := range map[string]map[string]any{
-		"no listen":     {},
-		"bad protocol":  {"listen": ":5514", "protocol": "sctp"},
-		"tls no cert":   {"listen": ":5514", "protocol": "tls"},
-		"bad flush":     {"listen": ":5514", "flush": "soon"},
-		"missing files": {"listen": ":5514", "protocol": "tls", "tls_cert_file": "/nope.pem", "tls_key_file": "/nope.key"},
+		"no listen":    {},
+		"bad protocol": {"listen": ":5514", "protocol": "sctp"},
+		"tls no cert":  {"listen": ":5514", "protocol": "tls"},
+		"bad flush":    {"listen": ":5514", "flush": "soon"},
 	} {
 		if _, err := newSyslog(domain.Source{Config: cfg}, StreamDeps{}); err == nil {
 			t.Errorf("%s: want an error", name)
 		}
+	}
+}
+
+// Certificate files are read only by the collector and only from its certificate
+// directory: the API's validation reads nothing, a path outside the directory or a link
+// out of it is refused, and the error does not tell a missing file from an unreadable one.
+func TestSyslogCertificateFilesStayInTheCertificateDirectory(t *testing.T) {
+	f := tlstest.New(t)
+	certDir := filepath.Dir(f.ServerCert)
+	outside := t.TempDir()
+	secret := filepath.Join(outside, "secret.pem")
+	if err := os.WriteFile(secret, []byte("not for you"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(secret, filepath.Join(certDir, "link.pem")); err != nil {
+		t.Fatal(err)
+	}
+	tlsCfg := func(cert, key string) domain.JSON {
+		return domain.JSON{"listen": "127.0.0.1:0", "protocol": "tls", "tls_cert_file": cert, "tls_key_file": key}
+	}
+	// API validation (no certificate directory): shape only, no file is touched
+	if _, err := newSyslog(domain.Source{Config: tlsCfg("/nope.pem", "/nope.key")}, StreamDeps{}); err != nil {
+		t.Errorf("validation must not read files: %v", err)
+	}
+	for name, c := range map[string]domain.JSON{
+		"outside":     tlsCfg(secret, f.ServerKey),
+		"dot-dot":     tlsCfg("../"+filepath.Base(outside)+"/secret.pem", f.ServerKey),
+		"link out":    tlsCfg("link.pem", f.ServerKey),
+		"missing":     tlsCfg("missing.pem", f.ServerKey),
+		"unreadable":  tlsCfg(filepath.Base(f.ServerKey), f.ServerKey), // a key is not a certificate
+		"missing key": tlsCfg(f.ServerCert, "nope.key"),
+	} {
+		_, err := newSyslog(domain.Source{Config: c}, StreamDeps{CertDir: certDir})
+		if err == nil {
+			t.Errorf("%s: want an error", name)
+			continue
+		}
+		if strings.Contains(err.Error(), "no such file") || strings.Contains(err.Error(), "permission denied") {
+			t.Errorf("%s: the error tells why the file failed: %v", name, err)
+		}
+	}
+	// the files named by name inside the directory work
+	if _, err := newSyslog(domain.Source{Config: tlsCfg(filepath.Base(f.ServerCert), filepath.Base(f.ServerKey))}, StreamDeps{CertDir: certDir}); err != nil {
+		t.Errorf("files in the directory: %v", err)
+	}
+	// a stream built without the directory cannot start a TLS listener
+	st, _ := newSyslog(domain.Source{Config: tlsCfg(f.ServerCert, f.ServerKey)}, StreamDeps{})
+	if err := st.Run(context.Background(), (&collect{}).emit); err == nil {
+		t.Error("a TLS listener without its certificate must not start")
 	}
 }
 

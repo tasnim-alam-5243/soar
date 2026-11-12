@@ -39,13 +39,28 @@ class _LogWriter(io.TextIOBase):
         return len(s)
 
 
+def _address_space():
+    """This process's virtual memory size in bytes (0 when it cannot be read)."""
+    try:
+        with open("/proc/self/status", encoding="ascii") as f:
+            for line in f:
+                if line.startswith("VmSize:"):
+                    return int(line.split()[1]) * 1024
+    except (OSError, ValueError, IndexError):
+        pass
+    return 0
+
+
 def apply_limits(limits):
     try:
         import resource
     except ImportError:  # not on Linux: limits come from the container only
         return
     mem = int(limits.get("memory_mb") or 256)
-    mem = max(mem, 64) * 1024 * 1024
+    # memory_mb is the action's own budget: it is added to the address space the bare
+    # interpreter already has, which differs a lot between hosts (glibc maps the whole
+    # locale archive, ~220 MB on RHEL, into every process; a slim image maps none).
+    mem = max(mem, 64) * 1024 * 1024 + _address_space()
     timeout = int(limits.get("timeout_s") or 60)
     # limits.cpu is a share of one core (manifest "cpu: 0.5"). A per-process core share
     # needs cgroups, which the runner container does not have, so it is enforced as a

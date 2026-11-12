@@ -15,7 +15,8 @@ connection_schema:
     base_url: { type: string, format: uri }
     api_version: { type: string, enum: [legacy_2_4], default: legacy_2_4 }
     customer_id: { type: integer, description: IRIS customer for new cases and alerts (default 1) }
-    ca_pem: { type: string }
+    ca_pem: { type: string, description: PEM of a private CA that signed the IRIS certificate }
+    verify_tls: { type: boolean, default: true, description: "false skips certificate checks (lab only: a self-signed IRIS certificate); every call logs a warning and host-pinned secrets are refused" }
 secrets: [api_key]
 defaults:
   class: python
@@ -63,7 +64,7 @@ actions:
     params_schema: { type: object, additionalProperties: false, required: [case_id], properties: { case_id: { type: integer } } }
   - id: iris.alert.create
     title: Create IRIS alert
-    description: Create an alert in IRIS (needs alert_write); IOCs and assets can be attached.
+    description: Create an alert in IRIS (needs alert_write); IOCs and assets can be attached. An IOC or asset whose type IRIS does not know is skipped and reported, not fatal.
     side_effect: write
     risk: low
     supports_dry_run: true
@@ -79,7 +80,10 @@ actions:
         source: { type: string }
         source_ref: { type: string }
         source_content: { type: object }
-        iocs: { type: array, items: { type: object } }
+        event_time: { type: string, description: "when the event happened (RFC 3339); default now" }
+        note: { type: string }
+        iocs: { type: array, items: { type: object }, description: "{type (SOAR type or IRIS type name), value, tlp, description}" }
+        assets: { type: array, items: { type: object }, description: "{name, type (IRIS asset type name, default Windows - Computer), ip, description}" }
         tags: { type: array, items: { type: string } }
   - id: iris.alert.update
     title: Update IRIS alert

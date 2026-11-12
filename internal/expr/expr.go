@@ -15,6 +15,7 @@ import (
 	"github.com/google/cel-go/cel"
 	"github.com/google/cel-go/common/types"
 	"github.com/google/cel-go/common/types/ref"
+	"github.com/google/cel-go/common/types/traits"
 )
 
 // Lists answers managed-list membership for in_list(value, "list_name").
@@ -293,13 +294,25 @@ func functions(lists Lists) []cel.EnvOption {
 			}
 			return val(out)
 		}))),
-		cel.Function("in_list", cel.Overload("in_list_dyn_string", []*cel.Type{d, s}, cel.BoolType, cel.BinaryBinding(func(v, l ref.Val) ref.Val {
-			name, ok := str(l)
-			if !ok {
-				return errv("in_list: list name must be a string")
-			}
-			return types.Bool(lists.Contains(name, Text(unwrap(v))))
-		}))),
+		cel.Function("in_list",
+			cel.Overload("in_list_dyn_string", []*cel.Type{d, s}, cel.BoolType, cel.BinaryBinding(func(v, l ref.Val) ref.Val {
+				name, ok := str(l)
+				if !ok {
+					return errv("in_list: list name must be a string")
+				}
+				return types.Bool(lists.Contains(name, Text(unwrap(v))))
+			})),
+			// CEL's own list-membership overload (the `in` operator) has the id "in_list",
+			// this function's name, so the runtime sends `x in ["a", "b"]` here: give it
+			// the standard meaning.
+			cel.Overload("in_list_dyn_list", []*cel.Type{d, cel.ListType(d)}, cel.BoolType, cel.BinaryBinding(func(v, l ref.Val) ref.Val {
+				c, ok := l.(traits.Container)
+				if !ok {
+					return types.NoSuchOverloadErr()
+				}
+				return c.Contains(v)
+			})),
+		),
 		cel.Function("severity_map", cel.Overload("severity_map_dyn_dyn", []*cel.Type{d, d}, cel.IntType, cel.BinaryBinding(func(v, m ref.Val) ref.Val {
 			table, ok := unwrap(m).(map[string]any)
 			if !ok {
