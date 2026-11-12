@@ -619,13 +619,24 @@ func weakensTransport(key string, v any) bool {
 		}
 		return v != nil
 	}
+	// explicitTrue is the only value that leaves verification or TLS on for certain: a
+	// connector may read "off", null, 0 or [] as false, so all of them weaken (fail closed)
+	explicitTrue := func() bool {
+		switch t := v.(type) {
+		case bool:
+			return t
+		case string:
+			return strings.ToLower(strings.TrimSpace(t)) == "true"
+		}
+		return false
+	}
 	switch {
 	case tlsKey(key):
-		return !truthy() // tls: false sends everything in clear text
+		return !explicitTrue() // tls: false sends everything in clear text
 	case strings.Contains(k, "insecure"), strings.Contains(k, "skip_verify"), strings.Contains(k, "skipverify"):
 		return truthy()
 	case k == "verify" || strings.HasSuffix(k, "_verify") || strings.HasPrefix(k, "verify_"):
-		return !truthy() // verify: false
+		return !explicitTrue() // verify_tls: false (or anything a connector could read as false)
 	case strings.Contains(k, "proxy"), k == "ca", strings.HasPrefix(k, "ca_"), strings.HasSuffix(k, "_ca"),
 		strings.Contains(k, "cacert"), strings.Contains(k, "ca_cert"), strings.Contains(k, "ca_file"),
 		strings.Contains(k, "cafile"), strings.Contains(k, "ca_bundle"), strings.Contains(k, "root_ca"):

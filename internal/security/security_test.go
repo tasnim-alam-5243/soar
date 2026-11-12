@@ -417,6 +417,16 @@ func TestSoleHostFailsClosed(t *testing.T) {
 		{domain.JSON{"base_url": "https://iris.example.com", "insecure_skip_verify": false}, "iris.example.com"},
 		{domain.JSON{"base_url": "https://iris.example.com", "verify": false}, ""},
 		{domain.JSON{"base_url": "https://iris.example.com", "verify_ssl": true}, "iris.example.com"},
+		// verify_tls (the IRIS connector): only an explicit true keeps the host; anything a
+		// connector might read as false withholds it
+		{domain.JSON{"base_url": "https://iris.example.com", "verify_tls": true}, "iris.example.com"},
+		{domain.JSON{"base_url": "https://iris.example.com", "verify_tls": "true"}, "iris.example.com"},
+		{domain.JSON{"base_url": "https://iris.example.com", "verify_tls": false}, ""},
+		{domain.JSON{"base_url": "https://iris.example.com", "verify_tls": "off"}, ""},
+		{domain.JSON{"base_url": "https://iris.example.com", "verify_tls": nil}, ""},
+		{domain.JSON{"base_url": "https://iris.example.com", "verify_tls": []any{}}, ""},
+		{domain.JSON{"base_url": "https://iris.example.com", "verify_tls": 0.0}, ""},
+		{domain.JSON{"base_url": "https://iris.example.com", "tls": "off"}, ""},
 		{domain.JSON{"base_url": "https://iris.example.com", "ca_file": "/tmp/evil-ca.pem"}, ""},
 		{domain.JSON{"base_url": "https://iris.example.com", "https_proxy": "https://iris.example.com:3128"}, ""},
 		{domain.JSON{"base_url": "https://iris.example.com", "client_cert_file": "/etc/soar/certs/c.pem"}, "iris.example.com"},

@@ -184,9 +184,11 @@ class ActionContext:
             h["Authorization"] = "Basic " + base64.b64encode(f"{user}:{pw}".encode()).decode()
         elif auth == "api_key_header":
             h[cfg.get("api_key_header", "X-API-Key")] = self.secret(cfg.get("token_secret", "api_key"))
+        # fail closed: only an explicit false (the boolean, or the string "false") turns
+        # verification off; null, "off", 0, [] and anything else keep it on. The platform
+        # applies the mirror rule before releasing a host-pinned secret.
         verify = cfg.get("verify_tls", True)
-        if isinstance(verify, str):
-            verify = verify.strip().lower() not in ("false", "0", "no", "off")
+        off = verify is False or (isinstance(verify, str) and verify.strip().lower() == "false")
         return HTTP(base_url or cfg.get("base_url", ""), headers=h, egress=self.egress,
                     timeout=min(self.remaining(), float(cfg.get("timeout_s", 30))),
-                    ca_pem=cfg.get("ca_pem"), log=self._log, verify_tls=bool(verify))
+                    ca_pem=cfg.get("ca_pem"), log=self._log, verify_tls=not off)

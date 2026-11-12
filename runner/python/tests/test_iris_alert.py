@@ -78,10 +78,13 @@ def iris(tmp_path_factory):
     srv.shutdown()
 
 
-def ctx(base_url, params, verify=None, logs=None):
+_ABSENT = object()
+
+
+def ctx(base_url, params, verify=_ABSENT, logs=None):
     conn = {"base_url": base_url, "customer_id": 3}
-    if verify is not None:
-        conn["verify_tls"] = verify
+    if verify is not _ABSENT:
+        conn["verify_tls"] = verify  # None here is an explicit null in the connection
     return ActionContext({"action_id": "iris.alert.create", "params": params, "connection": conn,
                           "secrets": {"api_key": "iris-key"}, "limits": {"timeout_s": 10}},
                          (logs if logs is not None else []).append)
@@ -141,6 +144,14 @@ def test_alert_create_sends_the_wazuh_alert(iris):
 def test_verify_tls_accepts_a_string(iris):
     out = IRIS.alert_create(ctx(iris, {"title": "x"}, verify="false"))
     assert out["alert_id"] == 42
+
+
+@pytest.mark.parametrize("value", [None, "off", "no", 0, [], {}, "", "falsey"])
+def test_only_an_explicit_false_turns_verification_off(iris, value):
+    # fail closed, mirroring the platform's host-pinning rule: anything but false verifies
+    with pytest.raises(ActionError) as e:
+        IRIS.alert_create(ctx(iris, {"title": "x"}, verify=value))
+    assert "CERTIFICATE_VERIFY_FAILED" in e.value.message
 
 
 def test_dry_run_calls_nothing(iris):
