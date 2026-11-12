@@ -149,7 +149,8 @@ services:
       nats: { condition: service_healthy }
       migrate: { condition: service_completed_successfully }
       seed: { condition: service_completed_successfully }
-    ports: ["127.0.0.1:8081:8081"]
+    # 127.0.0.1 by default; SOAR_INGEST_PUBLISH=<LAN address> in .env lets a Wazuh manager push here
+    ports: ["${SOAR_INGEST_PUBLISH:-127.0.0.1}:8081:8081"]
     healthcheck: { <<: *hc, test: ["CMD", "/soar", "healthcheck", "http://127.0.0.1:8081/readyz"] }
 
   processor:
@@ -169,6 +170,10 @@ services:
       <<: *soar-env
       SOAR_WAZUH_INDEXER_USER: "${SOAR_WAZUH_INDEXER_USER:-}"
       SOAR_WAZUH_INDEXER_PASSWORD: "${SOAR_WAZUH_INDEXER_PASSWORD:-}"
+      # local directories file_object sources may read (mount them here first); none by default
+      SOAR_INGEST_DIRS: "${SOAR_INGEST_DIRS:-}"
+    # syslog sources (adapter syslog, listen ":5514") receive here; loopback only in development
+    ports: ["127.0.0.1:5514:5514/udp", "127.0.0.1:5514:5514/tcp"]
     depends_on:
       opensearch: { condition: service_healthy }
       nats: { condition: service_healthy }

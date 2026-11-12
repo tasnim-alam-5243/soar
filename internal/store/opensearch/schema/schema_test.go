@@ -69,8 +69,8 @@ func TestBuildAll(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(plans) != 23 {
-		t.Fatalf("want 23 entities (22 from spec section 5 plus approvals), got %d", len(plans))
+	if len(plans) != 24 {
+		t.Fatalf("want 24 entities (22 from spec section 5 plus approvals and subscriptions), got %d", len(plans))
 	}
 	seen := map[string]bool{}
 	for _, p := range plans {

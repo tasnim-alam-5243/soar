@@ -43,6 +43,7 @@ type Collector struct {
 	Secrets func(ref, use string, consumers ...string) (string, error) // security.SecretStore.Resolver
 	Owner   string                                                     // identifies this replica in leases
 	Now     func() time.Time
+	Dirs    []string // local directories file_object sources may read (SOAR_INGEST_DIRS)
 
 	mu      sync.Mutex
 	running map[string]*worker
@@ -101,7 +102,7 @@ func (c *Collector) Run(ctx context.Context) error {
 func (c *Collector) reconcile(ctx context.Context) {
 	want := map[string]*ingest.Runtime{}
 	for _, rt := range c.Reg.All() {
-		if _, ok := adapters.Get(rt.Source.Adapter); ok && rt.Source.Enabled && rt.Pipeline != nil && rt.Err == nil {
+		if adapters.Known(rt.Source.Adapter) && rt.Source.Enabled && rt.Pipeline != nil && rt.Err == nil {
 			want[rt.Source.Name] = rt
 		}
 	}
@@ -180,6 +181,10 @@ func (c *Collector) state(ctx context.Context, rt *ingest.Runtime) (*sourceState
 }
 
 func (c *Collector) runSource(ctx context.Context, rt *ingest.Runtime) {
+	if spec, ok := adapters.GetStream(rt.Source.Adapter); ok {
+		c.runStream(ctx, rt, spec)
+		return
+	}
 	log := c.Log.With("source", rt.Source.Name)
 	interval, err := adapters.ParseSchedule(rt.Source.Schedule)
 	if err != nil {

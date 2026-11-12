@@ -321,3 +321,49 @@ func md5Base64(b []byte) string {
 	sum := md5.Sum(b)
 	return base64.StdEncoding.EncodeToString(sum[:])
 }
+
+// ObjectInfo describes one stored object.
+type ObjectInfo struct {
+	Key          string
+	Size         int64
+	LastModified time.Time
+	ETag         string // changes when the object is rewritten
+}
+
+// List returns up to max objects of bucket whose keys start with prefix and sort after
+// startAfter (ListObjectsV2, in key order), and whether more follow.
+func (s *S3) List(ctx context.Context, bucket, prefix, startAfter string, max int) ([]ObjectInfo, bool, error) {
+	q := url.Values{"list-type": {"2"}, "max-keys": {strconv.Itoa(max)}}
+	if prefix != "" {
+		q.Set("prefix", prefix)
+	}
+	if startAfter != "" {
+		q.Set("start-after", startAfter)
+	}
+	// the query is written the way SigV4 canonicalises it, so keys with spaces sign correctly
+	resp, err := s.do(ctx, http.MethodGet, s.Endpoint+"/"+bucket+"?"+canonicalQuery(q), nil, -1, nil)
+	if err != nil {
+		return nil, false, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		return nil, false, s3Error(resp)
+	}
+	var out struct {
+		IsTruncated bool `xml:"IsTruncated"`
+		Contents    []struct {
+			Key          string    `xml:"Key"`
+			Size         int64     `xml:"Size"`
+			LastModified time.Time `xml:"LastModified"`
+			ETag         string    `xml:"ETag"`
+		} `xml:"Contents"`
+	}
+	if err := xml.NewDecoder(io.LimitReader(resp.Body, 16<<20)).Decode(&out); err != nil {
+		return nil, false, fmt.Errorf("blob: list %s: %w", bucket, err)
+	}
+	objs := make([]ObjectInfo, 0, len(out.Contents))
+	for _, c := range out.Contents {
+		objs = append(objs, ObjectInfo{Key: c.Key, Size: c.Size, LastModified: c.LastModified, ETag: strings.Trim(c.ETag, `"`)})
+	}
+	return objs, out.IsTruncated, nil
+}

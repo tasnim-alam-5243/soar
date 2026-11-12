@@ -152,8 +152,8 @@ func TestApplyIsRepeatable(t *testing.T) {
 			t.Errorf("first run %s: want created, got %s %s", res.Alias, res.Action, res.Detail)
 		}
 	}
-	if len(first) != 23 {
-		t.Fatalf("want 23 results, got %d", len(first))
+	if len(first) != 24 {
+		t.Fatalf("want 24 results, got %d", len(first))
 	}
 	writes := len(f.calls)
 

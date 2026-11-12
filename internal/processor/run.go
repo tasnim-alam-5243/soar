@@ -29,15 +29,23 @@ func Run(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	waits, err := NewWaitIndex(st, log)
+	if err != nil {
+		return err
+	}
+	if err := waits.Refresh(ctx); err != nil {
+		log.Warn("could not load event waits yet; retrying in the background", "error", err.Error())
+	}
 	if err := triggers.Refresh(ctx); err != nil {
 		log.Warn("could not load workflow triggers yet; retrying in the background", "error", err.Error())
 	}
 	p := &Processor{
-		Cons: cons, Bulk: opensearch.NewBulk(osc, opensearch.BulkConfig{}), St: st, DLQ: q, Triggers: triggers, Starts: q, Log: log,
+		Cons: cons, Bulk: opensearch.NewBulk(osc, opensearch.BulkConfig{}), St: st, DLQ: q, Triggers: triggers, Waits: waits, Starts: q, Log: log,
 		Cfg: Config{Workers: cfg.ProcessorWorkers, Partitions: cfg.Partitions},
 	}
 	return service.RunRole(ctx, "processor", cfg, log, func(*http.ServeMux, *opensearch.Client) {},
 		func(ctx context.Context) error { triggers.Run(ctx, 10*time.Second); return nil },
+		func(ctx context.Context) error { waits.Run(ctx, 2*time.Second); return nil },
 		func(ctx context.Context) error {
 			return q.MoveMaxDeliveries(ctx, func(seq uint64) {
 				obs.DLQMessages.WithLabelValues("events").Inc()

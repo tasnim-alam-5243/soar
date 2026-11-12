@@ -34,6 +34,7 @@ const (
 	MsgCancel     = "cancel"
 	MsgApproval   = "approval"
 	MsgChildDone  = "child_done"
+	MsgEvent      = "event" // an ingested event matched a wait's subscription
 )
 
 // Envelope is the message format of spec 8.2:

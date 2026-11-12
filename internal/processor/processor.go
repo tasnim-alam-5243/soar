@@ -83,6 +83,7 @@ func (c *Config) defaults() {
 // Counters are exported for health output and tests.
 type Counters struct {
 	Processed, Duplicates, DeadLettered, Retried, Executions atomic.Int64
+	WaitsResumed                                             atomic.Int64 // waiting executions an event resumed
 	Held                                                     atomic.Int64 // batches held while OpenSearch was unavailable
 }
 
@@ -93,7 +94,8 @@ type Processor struct {
 	St       *store.Store
 	DLQ      DLQ
 	Triggers *TriggerIndex
-	Starts   Starter // publishes execution start messages (nil: the sweeper starts them)
+	Waits    *WaitIndex // open event waits (nil: none are matched)
+	Starts   Starter    // publishes execution start messages (nil: the sweeper starts them)
 	Log      *slog.Logger
 	Cfg      Config
 	Stats    Counters
@@ -587,6 +589,10 @@ func (p *Processor) HandleBatch(ctx context.Context, msgs []jetstream.Msg) {
 			}
 		}
 	}
+
+	// waits for an event (Step 10): every stored event is matched against the open
+	// subscriptions; a match resumes its execution
+	p.resumeWaits(ctx, items)
 
 	// 4. settle every message. Acknowledgements are confirmed round trips (DoubleAck) and
 	// each one is a write in the work-queue stream, so they run concurrently.

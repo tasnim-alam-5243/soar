@@ -36,7 +36,7 @@ func TestPurgeRunsAsAPolledBackgroundTask(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n != 14 {
+	if n != 21 { // seen, idempotency, subscriptions
 		t.Errorf("deleted = %d, want 7 per index", n)
 	}
 	for _, r := range *log {

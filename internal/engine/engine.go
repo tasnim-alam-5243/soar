@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/fnv"
+	"sort"
 	"time"
 
 	"github.com/yourorg/soar/internal/expr"
@@ -35,6 +36,8 @@ func Next(w *Workflow, execID string, st *State, ev Event) Result {
 		r.timer()
 	case EvApproval:
 		r.approval()
+	case EvEvent:
+		r.eventReceived()
 	case EvChildDone:
 		r.childDone()
 	case EvCancel:
@@ -198,6 +201,19 @@ func (r *run) timer() {
 		r.changed = true
 		ns.Output = map[string]any{"waited_until": r.ev.At.UTC().Format(time.RFC3339Nano)}
 		r.succeed(ns, n.Next)
+		r.advance()
+	case TimerEvent:
+		if n.Type != TypeWait || n.EventMatch == "" || ns.Status != NodeWaiting {
+			return
+		}
+		r.changed = true
+		r.unsubscribe(ns)
+		if n.EventOnTimeout == "continue" {
+			ns.Output = map[string]any{"timed_out": true}
+			r.succeed(ns, n.Next)
+		} else {
+			r.nodeFailed(n, ns, &StepError{Code: "event_timeout", Message: "no matching event within " + fmtDuration(n.EventTimeout)})
+		}
 		r.advance()
 	case TimerApproval:
 		if n.Type != TypeApproval || ns.Status != NodeWaiting {
@@ -382,6 +398,10 @@ func (r *run) activate(n *Node) {
 		ns.Output = assigned
 		r.succeed(ns, n.Next)
 	case TypeWait:
+		if n.EventMatch != "" {
+			r.waitForEvent(n, ns)
+			return
+		}
 		due := r.ev.At.Add(n.Duration)
 		if n.Until != nil {
 			v, err := n.Until.Eval(r.vars(0, nil))
@@ -812,4 +832,55 @@ func normMap(m map[string]any) map[string]any {
 	}
 	out, _ := norm(m).(map[string]any)
 	return out
+}
+
+// waitForEvent starts a wait for an event: the with values are fixed now, the
+// orchestrator stores the subscription, and a timer bounds the wait.
+func (r *run) waitForEvent(n *Node, ns *NodeState) {
+	with := map[string]any{}
+	keys := make([]string, 0, len(n.EventWith))
+	for k := range n.EventWith {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		v, err := n.EventWith[k].Eval(r.vars(0, nil))
+		if err != nil {
+			r.nodeFailed(n, ns, exprError("event.with."+k, err))
+			return
+		}
+		with[k] = norm(v)
+	}
+	due := r.ev.At.Add(n.EventTimeout).UTC()
+	ns.Status = NodeWaiting
+	ns.SubscriptionID = SubscriptionID(r.execID, n.ID)
+	r.cmds = append(r.cmds, Command{Kind: CmdSubscribe, Key: "subscribe:" + ns.SubscriptionID, Subscribe: &Subscription{
+		ID: ns.SubscriptionID, ExecutionID: r.execID, NodeID: n.ID, Match: n.EventMatch, With: with, DueAt: due,
+	}})
+	r.timerCmd(TimerEvent, n.ID, 0, 0, due)
+}
+
+// eventReceived resumes a wait whose subscription matched an ingested event. A second
+// match (or one after the timeout) changes nothing.
+func (r *run) eventReceived() {
+	n, ns := r.w.Node(r.ev.NodeID), r.st.Nodes[r.ev.NodeID]
+	if r.terminal() || n == nil || ns == nil || n.Type != TypeWait || n.EventMatch == "" || ns.Status != NodeWaiting {
+		return
+	}
+	r.changed = true
+	ns.Output = map[string]any{"event": norm(r.ev.Output), "received_at": r.ev.At.UTC().Format(time.RFC3339Nano)}
+	r.unsubscribe(ns)
+	r.succeed(ns, n.Next)
+	r.advance()
+}
+
+// unsubscribe closes a wait's subscription (idempotent in the orchestrator).
+func (r *run) unsubscribe(ns *NodeState) {
+	if ns.SubscriptionID == "" {
+		return
+	}
+	r.cmds = append(r.cmds, Command{
+		Kind: CmdUnsubscribe, Key: "unsubscribe:" + ns.SubscriptionID,
+		Subscribe: &Subscription{ID: ns.SubscriptionID, ExecutionID: r.execID, NodeID: r.ev.NodeID},
+	})
 }

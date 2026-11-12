@@ -38,6 +38,7 @@ const (
 	EvApproval   = "approval"
 	EvChildDone  = "child_done"
 	EvCancel     = "cancel"
+	EvEvent      = "event" // an ingested event matched a wait's subscription
 )
 
 // Timer kinds.
@@ -46,6 +47,7 @@ const (
 	TimerWait     = "wait"
 	TimerDeadline = "deadline"
 	TimerApproval = "approval_timeout"
+	TimerEvent    = "event_timeout" // a wait for an event gave up
 )
 
 // Command kinds.
@@ -55,6 +57,8 @@ const (
 	CmdApproval     = "approval"
 	CmdStartChild   = "start_child"
 	CmdNotifyParent = "notify_parent"
+	CmdSubscribe    = "subscribe"   // start waiting for an event
+	CmdUnsubscribe  = "unsubscribe" // stop waiting (timeout or the node ended)
 )
 
 // IsTerminal reports whether an execution status is final.
@@ -98,19 +102,20 @@ type ItemState struct {
 
 // NodeState is the progress of one node.
 type NodeState struct {
-	Status     string       `json:"status"`
-	Attempt    int          `json:"attempt,omitempty"`
-	Output     any          `json:"output,omitempty"`
-	OutputRef  string       `json:"output_ref,omitempty"`
-	Error      *StepError   `json:"error,omitempty"`
-	Fired      []string     `json:"fired,omitempty"`  // successors this node activated
-	Passed     bool         `json:"passed,omitempty"` // skipped by its own when: condition
-	StartedAt  *time.Time   `json:"started_at,omitempty"`
-	EndedAt    *time.Time   `json:"ended_at,omitempty"`
-	Items      []any        `json:"items,omitempty"`
-	ItemStates []*ItemState `json:"item_states,omitempty"`
-	ApprovalID string       `json:"approval_id,omitempty"`
-	ChildID    string       `json:"child_id,omitempty"`
+	Status         string       `json:"status"`
+	Attempt        int          `json:"attempt,omitempty"`
+	Output         any          `json:"output,omitempty"`
+	OutputRef      string       `json:"output_ref,omitempty"`
+	Error          *StepError   `json:"error,omitempty"`
+	Fired          []string     `json:"fired,omitempty"`  // successors this node activated
+	Passed         bool         `json:"passed,omitempty"` // skipped by its own when: condition
+	StartedAt      *time.Time   `json:"started_at,omitempty"`
+	EndedAt        *time.Time   `json:"ended_at,omitempty"`
+	Items          []any        `json:"items,omitempty"`
+	ItemStates     []*ItemState `json:"item_states,omitempty"`
+	ApprovalID     string       `json:"approval_id,omitempty"`
+	ChildID        string       `json:"child_id,omitempty"`
+	SubscriptionID string       `json:"subscription_id,omitempty"` // wait for an event
 }
 
 // State is everything the engine knows about an execution. It is stored as the
@@ -257,13 +262,14 @@ type ParentNotice struct {
 // Command is a side effect for the orchestrator. Key is unique per effect and used
 // as the outbox key and as Nats-Msg-Id, so carrying a command out twice is harmless.
 type Command struct {
-	Kind     string           `json:"kind"`
-	Key      string           `json:"key"`
-	Dispatch *Dispatch        `json:"dispatch,omitempty"`
-	Timer    *Timer           `json:"timer,omitempty"`
-	Approval *ApprovalRequest `json:"approval,omitempty"`
-	Child    *ChildStart      `json:"child,omitempty"`
-	Parent   *ParentNotice    `json:"parent,omitempty"`
+	Kind      string           `json:"kind"`
+	Key       string           `json:"key"`
+	Dispatch  *Dispatch        `json:"dispatch,omitempty"`
+	Timer     *Timer           `json:"timer,omitempty"`
+	Approval  *ApprovalRequest `json:"approval,omitempty"`
+	Child     *ChildStart      `json:"child,omitempty"`
+	Parent    *ParentNotice    `json:"parent,omitempty"`
+	Subscribe *Subscription    `json:"subscribe,omitempty"` // subscribe and unsubscribe (ID only)
 }
 
 // Result is the outcome of Next. Changed is false when the event did not apply
@@ -325,4 +331,20 @@ func ApprovalID(execID, nodeID string) string { return domain.DeterministicID("a
 
 func ChildID(execID, nodeID string) string {
 	return domain.DeterministicID(domain.PrefixExecution, execID, "child", nodeID)
+}
+
+// Subscription asks to be told when an ingested event matches Match (a CEL expression
+// over `event` and `wait`, the With values computed when the wait started).
+type Subscription struct {
+	ID          string         `json:"id"`
+	ExecutionID string         `json:"execution_id"`
+	NodeID      string         `json:"node_id"`
+	Match       string         `json:"match,omitempty"`
+	With        map[string]any `json:"with,omitempty"`
+	DueAt       time.Time      `json:"due_at"`
+}
+
+// SubscriptionID is the deterministic id of a wait node's subscription.
+func SubscriptionID(execID, nodeID string) string {
+	return domain.DeterministicID("sub", execID, nodeID)
 }

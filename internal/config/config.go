@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -83,6 +84,9 @@ type Config struct {
 	NATSTLS       *tls.Config // NATS client TLS (nil: plain, or system roots for tls:// URLs)
 	ServerTLS     *tls.Config // HTTPS for the role's own port (nil: plain HTTP)
 	ClientCertReq bool        // ServerTLS requires client certificates (mTLS)
+
+	// Step 10: ingest.
+	IngestDirs []string // directories file_object sources may read on the collector (none by default)
 }
 
 // ValidationError lists every invalid setting.
@@ -275,6 +279,15 @@ func Load(lookup func(string) (string, bool)) (Config, error) {
 		c.PolicyFile = v
 	}
 
+	// Step 10: local directories file:// sources may read (and, with after: delete, empty)
+	for _, d := range splitList(get("SOAR_INGEST_DIRS")) {
+		if !filepath.IsAbs(d) || filepath.Clean(d) == "/" {
+			bad("SOAR_INGEST_DIRS: %q must be an absolute directory other than /", d)
+			continue
+		}
+		c.IngestDirs = append(c.IngestDirs, filepath.Clean(d))
+	}
+
 	// Step 9
 	c.MasterKeyID = get("SOAR_MASTER_KEY_ID")
 	if v := get("SOAR_MASTER_KEY"); v != "" {
@@ -383,6 +396,7 @@ func (c Config) LogValue() slog.Value {
 		slog.Any("worker_priorities", c.WorkerPriorities),
 		slog.Any("worker_classes", c.WorkerClasses),
 		slog.Int("worker_concurrency", c.WorkerConcurrency),
+		slog.Any("ingest_dirs", c.IngestDirs),
 		slog.Bool("master_key", len(c.MasterKey) > 0),
 		slog.String("master_key_id", c.MasterKeyID),
 		slog.String("oidc_issuer", c.OIDCIssuer),

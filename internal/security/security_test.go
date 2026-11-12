@@ -375,8 +375,10 @@ func TestHostPinnedSecretFollowsTheEndpointNotTheConnector(t *testing.T) {
 	// same name as the legitimate connection (names are not unique), another host
 	rogue := domain.Connection{Meta: domain.Meta{ID: "con_rogue"}, ConnectorID: "dfir_iris", Name: "iris-prod", Config: domain.JSON{"base_url": "https://attacker.invalid"}}
 	// base_url on the pinned host, but another URL key a connector might use elsewhere
-	mixed := domain.Connection{Meta: domain.Meta{ID: "con_mixed"}, ConnectorID: "dfir_iris", Name: "iris-x",
-		Config: domain.JSON{"base_url": "https://iris.example.com", "options": map[string]any{"token_url": "https://attacker.invalid/token"}}}
+	mixed := domain.Connection{
+		Meta: domain.Meta{ID: "con_mixed"}, ConnectorID: "dfir_iris", Name: "iris-x",
+		Config: domain.JSON{"base_url": "https://iris.example.com", "options": map[string]any{"token_url": "https://attacker.invalid/token"}},
+	}
 	if v, err := ss.ResolveFor(ctx, "iris_prod", UseConnection, ConnectionConsumers(legit)...); err != nil || v != "v-iris" {
 		t.Errorf("pinned host: %q %v", v, err)
 	}
@@ -429,7 +431,21 @@ func TestSoleHostFailsClosed(t *testing.T) {
 		{domain.JSON{"base_url": "//attacker.invalid/x"}, ""},
 		{domain.JSON{"base_url": "https://iris.example.com.", "x": 1}, ""},
 		{domain.JSON{"base_url": "https://iris.example.com", "note": "see https://attacker.invalid/doc"}, ""},
-		{domain.JSON{"host": "iris.example.com", "port": 443}, "iris.example.com"}, // bare host: the connector decides the scheme
+		// a bare host has no scheme: only an explicit top-level tls: true makes it count
+		{domain.JSON{"host": "iris.example.com", "port": 443}, ""},
+		{domain.JSON{"host": "iris.example.com", "port": 443, "tls": true}, "iris.example.com"},
+		{domain.JSON{"host": "iris.example.com", "tls": "true"}, ""},
+		{domain.JSON{"host": "iris.example.com", "options": map[string]any{"tls": true}}, ""},
+		// Kafka: brokers are endpoints; a decoy URL cannot lend its host to them
+		{domain.JSON{"brokers": []any{"attacker.invalid:9092"}, "base_url": "https://iris.example.com", "tls": true}, ""},
+		{domain.JSON{"brokers": []any{"kafka.example.com:9093"}, "tls": true}, "kafka.example.com"},
+		{domain.JSON{"brokers": []any{"kafka.example.com:9092"}}, ""},
+		{domain.JSON{"brokers": []any{"kafka.example.com:9093"}, "tls": false}, ""},
+		{domain.JSON{"brokers": "kafka.example.com:9093,attacker.invalid:9093", "tls": true}, ""},
+		{domain.JSON{"bootstrap_servers": "attacker.invalid:9093", "base_url": "https://iris.example.com", "tls": true}, ""},
+		// a host:port under any key is an endpoint
+		{domain.JSON{"base_url": "https://iris.example.com", "relay": "attacker.invalid:25"}, ""},
+		{domain.JSON{"base_url": "https://iris.example.com", "ssl": false}, ""},
 		{domain.JSON{"timeout": 30}, ""},
 	} {
 		if got := soleHost(map[string]any(c.cfg)); got != c.want {

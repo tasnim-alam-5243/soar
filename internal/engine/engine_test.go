@@ -789,3 +789,113 @@ func TestStateMachineTable(t *testing.T) {
 		}
 	}
 }
+
+// Step 10: a wait for an event subscribes with its `with` values fixed at the start,
+// resumes on the first matching event and exposes it as the node's output.
+func TestWaitForEvent(t *testing.T) {
+	src := `
+inputs: [{ name: host, default: "" }]
+nodes:
+  - id: isolated
+    type: wait
+    event:
+      match: 'event.title == "Host isolated" && wait.host in event.entities.hosts'
+      with: { host: 'inputs.host' }
+    timeout: 2h
+  - { id: after, type: set, vars: { seen: 'steps.isolated.output.event.title' } }
+edges: [isolated -> after]
+`
+	w := mustCompile(t, src)
+	s := newSim(t, w)
+	s.apply(Event{Type: EvStart, Inputs: map[string]any{"host": "web01"}})
+	var sub *Subscription
+	var timer *Timer
+	for _, c := range s.cmds {
+		if c.Kind == CmdSubscribe {
+			sub = c.Subscribe
+		}
+	}
+	for _, tm := range s.timers {
+		if tm.Kind == TimerEvent {
+			timer = tm
+		}
+	}
+	if sub == nil || sub.ID != SubscriptionID("exe_test", "isolated") || sub.With["host"] != "web01" || !sub.DueAt.Equal(t0.Add(2*time.Hour)) ||
+		!strings.Contains(sub.Match, "Host isolated") {
+		t.Fatalf("subscription %+v", sub)
+	}
+	if timer == nil || !timer.DueAt.Equal(sub.DueAt) || s.st.Status != StatusWaiting || s.nodeStatus("isolated") != NodeWaiting {
+		t.Fatalf("timer %+v status %s/%s", timer, s.st.Status, s.nodeStatus("isolated"))
+	}
+	s.cmds = nil
+	ev := map[string]any{"title": "Host isolated", "entities": map[string]any{"hosts": []any{"web01"}}}
+	s.apply(Event{Type: EvEvent, NodeID: "isolated", Output: ev})
+	if s.st.Status != StatusSucceeded || s.st.Vars["seen"] != "Host isolated" {
+		t.Fatalf("after the event: %s vars %v", s.st.Status, s.st.Vars)
+	}
+	unsub := false
+	for _, c := range s.cmds {
+		unsub = unsub || (c.Kind == CmdUnsubscribe && c.Subscribe.ID == sub.ID)
+	}
+	if !unsub {
+		t.Error("the subscription must be closed when the event arrives")
+	}
+	if res := s.apply(Event{Type: EvEvent, NodeID: "isolated", Output: ev}); res.Changed {
+		t.Error("a second matching event must be ignored")
+	}
+	if res := s.apply(Event{Type: EvTimer, NodeID: "isolated", TimerKind: TimerEvent}); res.Changed {
+		t.Error("the timeout after the event must be ignored")
+	}
+}
+
+func TestWaitForEventTimeout(t *testing.T) {
+	for _, c := range []struct {
+		onTimeout, wantStatus string
+	}{{"", StatusFailed}, {"fail", StatusFailed}, {"continue", StatusSucceeded}} {
+		extra := ""
+		if c.onTimeout != "" {
+			extra = ", on_timeout: " + c.onTimeout
+		}
+		w := mustCompile(t, `
+nodes:
+  - { id: w, type: wait, event: { match: 'event.title == "never"' }, timeout: 10m`+extra+` }
+`)
+		s := newSim(t, w)
+		s.apply(Event{Type: EvStart})
+		s.apply(Event{Type: EvTimer, NodeID: "w", TimerKind: TimerEvent, At: t0.Add(10 * time.Minute)})
+		ns := s.st.Nodes["w"]
+		if s.st.Status != c.wantStatus {
+			t.Errorf("on_timeout %q: status %s (%+v)", c.onTimeout, s.st.Status, ns)
+		}
+		if c.wantStatus == StatusFailed && (ns.Error == nil || ns.Error.Code != "event_timeout") {
+			t.Errorf("on_timeout %q: error %+v", c.onTimeout, ns.Error)
+		}
+		if c.wantStatus == StatusSucceeded && (ns.Output == nil || ns.Output.(map[string]any)["timed_out"] != true) {
+			t.Errorf("continue: output %v", ns.Output)
+		}
+		if res := s.apply(Event{Type: EvEvent, NodeID: "w", Output: map[string]any{"title": "never"}}); res.Changed {
+			t.Errorf("on_timeout %q: an event after the timeout must be ignored", c.onTimeout)
+		}
+	}
+}
+
+func TestWaitForEventValidation(t *testing.T) {
+	for name, src := range map[string]string{
+		"no match":               `{"nodes":[{"id":"w","type":"wait","event":{}}]}`,
+		"match does not compile": `{"nodes":[{"id":"w","type":"wait","event":{"match":"event.title =="}}]}`,
+		"unknown variable":       `{"nodes":[{"id":"w","type":"wait","event":{"match":"alert.title == \"x\""}}]}`,
+		"unknown event field":    `{"nodes":[{"id":"w","type":"wait","event":{"match":"true","when":"x"}}]}`,
+		"event and duration":     `{"nodes":[{"id":"w","type":"wait","duration":"5m","event":{"match":"true"}}]}`,
+		"timeout without event":  `{"nodes":[{"id":"w","type":"wait","duration":"5m","timeout":"1h"}]}`,
+		"bad on_timeout":         `{"nodes":[{"id":"w","type":"wait","event":{"match":"true"},"on_timeout":"approve"}]}`,
+		"timeout too long":       `{"nodes":[{"id":"w","type":"wait","event":{"match":"true"},"timeout":"400d"}]}`,
+	} {
+		var m map[string]any
+		if err := json.Unmarshal([]byte(src), &m); err != nil {
+			t.Fatal(err)
+		}
+		if _, errs := Compile(m, nil); len(errs) == 0 {
+			t.Errorf("%s: want a validation error", name)
+		}
+	}
+}

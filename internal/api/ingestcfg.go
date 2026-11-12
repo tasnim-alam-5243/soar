@@ -129,10 +129,9 @@ func (s *Server) validateSource(ctx context.Context, d domain.Source) error {
 		v.add("name", "must be 1-64 characters: lowercase letters, digits, - and _, starting with a letter or digit")
 	}
 	isPush := d.Adapter == "webhook"
-	if !isPush {
-		if _, ok := adapters.Get(d.Adapter); !ok {
-			v.add("adapter", "must be webhook or one of %v", adapters.Names())
-		}
+	stream, isStream := adapters.GetStream(d.Adapter)
+	if !isPush && !adapters.Known(d.Adapter) {
+		v.add("adapter", "must be webhook or one of %v", append(adapters.Names(), adapters.StreamNames()...))
 	}
 	if _, ok := parsers.Get(d.Parser); !ok {
 		v.add("parser", "must be one of %v", parsers.Names())
@@ -153,6 +152,20 @@ func (s *Server) validateSource(ctx context.Context, d domain.Source) error {
 					v.add("auth."+k, "%s", security.EnvRefRule(security.UseIngestAuth))
 				}
 			}
+		}
+	} else if isStream {
+		// streams run continuously; an exclusive one (file/object) polls on its schedule
+		if stream.Exclusive {
+			if _, err := adapters.ParseSchedule(d.Schedule); err != nil {
+				v.add("schedule", "%s", err.Error())
+			}
+		}
+		if name, _ := d.Config["connection"].(string); name == "" && stream.NeedsConnection {
+			v.add("config.connection", "is required for %s sources", d.Adapter)
+		}
+		// building the stream checks its configuration without starting it
+		if _, err := stream.New(d, adapters.StreamDeps{}); err != nil { // no connection: source checks only
+			v.add("config", "%s", err.Error())
 		}
 	} else {
 		if _, err := adapters.ParseSchedule(d.Schedule); err != nil {

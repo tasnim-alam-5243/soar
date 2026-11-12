@@ -135,6 +135,11 @@ type Node struct {
 	Duration time.Duration // wait
 	Until    *expr.Program
 
+	EventMatch     string            // wait for an event: CEL over event and wait (compiled by NewEventCEL)
+	EventWith      map[string]*Value // evaluated when the wait starts; read in EventMatch as wait.<name>
+	EventTimeout   time.Duration
+	EventOnTimeout string // fail | continue
+
 	Approvers       []string // approval
 	Message         *Value
 	ApprovalTimeout time.Duration
@@ -185,7 +190,7 @@ var fieldsByType = map[string][]string{
 	TypeBranch:      {"cases", "default"},
 	TypeParallel:    {"branches"},
 	TypeForeach:     {"items", "action", "params", "retry", "timeout", "idempotency_key", "priority", "concurrency"},
-	TypeWait:        {"duration", "until"},
+	TypeWait:        {"duration", "until", "event", "timeout", "on_timeout"},
 	TypeApproval:    {"approvers", "message", "timeout", "on_timeout", "on_reject"},
 	TypeSet:         {"vars"},
 	TypeSubworkflow: {"workflow", "inputs"},
@@ -499,8 +504,23 @@ func (c *compiler) node(n *Node, m map[string]any, path string) {
 		if s, ok := m["until"].(string); ok && s != "" {
 			n.Until = c.expr(s, path+".until")
 		}
-		if (n.Duration == 0) == (n.Until == nil) {
-			c.add(path, "give exactly one of duration or until")
+		_, hasEvent := m["event"]
+		if hasEvent {
+			c.eventWait(n, m, path)
+		} else if _, ok := m["timeout"]; ok {
+			c.add(path+".timeout", "only a wait for an event has a timeout")
+		}
+		if _, ok := m["on_timeout"]; ok && !hasEvent {
+			c.add(path+".on_timeout", "only a wait for an event has on_timeout")
+		}
+		set := 0
+		for _, b := range []bool{n.Duration != 0, n.Until != nil, hasEvent} {
+			if b {
+				set++
+			}
+		}
+		if set != 1 {
+			c.add(path, "give exactly one of duration, until or event")
 		}
 	case TypeApproval:
 		n.Approvers = DefaultApprovers
@@ -967,3 +987,69 @@ func sortedKeys[V any](m map[string]V) []string {
 
 // Preds returns the nodes that lead to id.
 func (w *Workflow) Preds(id string) []string { return w.preds[id] }
+
+// EventVars are the variables of a wait's event match: the incoming event (the
+// normalized alert or event, as stored) and wait, the values of event.with.
+var EventVars = []string{"event", "wait"}
+
+// NewEventCEL returns the expression engine for event matches. The processor compiles
+// subscriptions with it, so a match that validated here also runs there.
+func NewEventCEL() (*expr.Engine, error) {
+	e, err := expr.New(nil, EventVars...)
+	if err != nil {
+		return nil, err
+	}
+	e.SetCostLimit(CELCostLimit)
+	return e, nil
+}
+
+// DefaultEventTimeout is how long a wait for an event lasts without a timeout.
+const DefaultEventTimeout = 24 * time.Hour
+
+// eventWait compiles `wait` with `event: {match, with}`, `timeout` and `on_timeout`.
+func (c *compiler) eventWait(n *Node, m map[string]any, path string) {
+	ev, ok := m["event"].(map[string]any)
+	if !ok {
+		c.add(path+".event", "must be an object with match (and optionally with)")
+		return
+	}
+	for k := range ev {
+		if k != "match" && k != "with" {
+			c.add(path+".event."+k, "unknown field (event takes match and with)")
+		}
+	}
+	match, _ := ev["match"].(string)
+	if strings.TrimSpace(match) == "" {
+		c.add(path+".event.match", "is required: a CEL condition over event (and wait.<name>)")
+	} else if eng, err := NewEventCEL(); err != nil {
+		c.add(path+".event.match", "%s", err.Error())
+	} else if _, err := eng.Compile(match); err != nil {
+		c.add(path+".event.match", "does not compile: %s", err.Error())
+	}
+	n.EventMatch = match
+	if raw, ok := ev["with"]; ok {
+		w, ok := raw.(map[string]any)
+		if !ok {
+			c.add(path+".event.with", "must be an object of name: expression")
+		}
+		n.EventWith = map[string]*Value{}
+		for _, k := range sortedKeys(w) {
+			n.EventWith[k] = c.value(w[k], path+".event.with."+k, false)
+		}
+	}
+	n.EventTimeout = DefaultEventTimeout
+	if raw, ok := m["timeout"]; ok {
+		d, err := parseDurationAny(raw)
+		if err != nil || d <= 0 || d > MaxDeadline {
+			c.add(path+".timeout", "must be a positive duration up to %s", fmtDuration(MaxDeadline))
+		}
+		n.EventTimeout = d
+	}
+	n.EventOnTimeout = "fail"
+	if s, ok := m["on_timeout"].(string); ok {
+		if s != "fail" && s != "continue" {
+			c.add(path+".on_timeout", "must be fail or continue")
+		}
+		n.EventOnTimeout = s
+	}
+}

@@ -433,3 +433,21 @@ type Evidence struct {
 	AddedBy     string    `json:"added_by,omitempty"`
 	AddedAt     time.Time `json:"added_at"`
 }
+
+// Subscription is a workflow waiting for an ingested event (a wait node with event,
+// Step 10). The processor matches every stored event against the open subscriptions
+// and resumes the execution on the first match.
+type Subscription struct {
+	Meta
+	ExecutionID    string     `json:"execution_id"`
+	WorkflowID     string     `json:"workflow_id,omitempty"`
+	NodeID         string     `json:"node_id"`
+	Partition      int        `json:"partition"`
+	Match          string     `json:"match"`          // CEL over event and wait
+	With           JSON       `json:"with,omitempty"` // the wait.<name> values, fixed when the wait started
+	Status         string     `json:"status"`         // open | matched | closed
+	DueAt          time.Time  `json:"due_at"`         // the wait's timeout
+	ExpiresAt      time.Time  `json:"expires_at"`     // purged after (due_at + 1 day)
+	MatchedEventID string     `json:"matched_event_id,omitempty"`
+	MatchedAt      *time.Time `json:"matched_at,omitempty"`
+}

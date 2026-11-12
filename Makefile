@@ -22,7 +22,7 @@ build: ## Build the soar binary into bin/
 image: image-soar image-runner image-web ## Build all container images (soar, soar-runner, soar-web)
 
 image-soar: ## Build the soar:dev image (every Go role)
-	$(DOCKER) build -f deploy/docker/Dockerfile --build-arg VERSION=$(VERSION) --build-arg COMMIT=$(COMMIT) -t soar:dev .
+	$(DOCKER) build --pull -f deploy/docker/Dockerfile --build-arg VERSION=$(VERSION) --build-arg COMMIT=$(COMMIT) -t soar:dev .
 
 image-runner: ## Build the soar-runner:dev image (sandboxed Python runner + integrations)
 	$(DOCKER) build -f deploy/docker/runner.Dockerfile -t soar-runner:dev .

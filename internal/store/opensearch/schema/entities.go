@@ -115,6 +115,10 @@ func Entities() []Entity {
 		{Name: "idempotency", Kind: State, Refresh: "30s", RetentionClass: "idempotency", Model: domain.Idempotency{}, Props: Props{
 			"key": kw(), "status": kw(), "result_ref": kw(), "result": blob(), "expires_at": date(),
 		}},
+		{Name: "subscriptions", Kind: State, Model: domain.Subscription{}, Props: Props{
+			"execution_id": kw(), "workflow_id": kw(), "node_id": kw(), "partition": integer(), "match": stored(),
+			"with": blob(), "status": kw(), "due_at": date(), "expires_at": date(), "matched_event_id": kw(), "matched_at": date(),
+		}},
 		{Name: "timers", Kind: State, Model: domain.Timer{}, Props: Props{
 			"execution_id": kw(), "node_id": kw(), "due_at": date(), "kind": kw(),
 			"attempt": integer(), "item": integer(), "partition": integer(),

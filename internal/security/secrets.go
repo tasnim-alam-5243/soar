@@ -374,19 +374,29 @@ func ConnectionConsumers(conn domain.Connection) []string {
 // of them must agree. Anything a connector or an HTTP library could read differently
 // (user info, backslashes, spaces, an upper-case or non-http scheme, a bare host
 // elsewhere) withholds the attribute, so a host-pinned secret is refused.
+//
+// A bare host[:port] (Kafka brokers, a "host" key) carries no scheme: the connector
+// decides how it travels, so it counts only when the configuration says tls: true at
+// its top level (a boolean, as connectors read it). Any value shaped like host:port
+// counts as an endpoint whatever its key.
 func soleHost(v any) string {
 	hosts := map[string]bool{}
 	ok := true
-	var walk func(key string, x any)
-	walk = func(key string, x any) {
+	bare, tlsOn := false, false
+	var walk func(key string, x any, depth int)
+	walk = func(key string, x any, depth int) {
 		if weakensTransport(key, x) {
 			ok = false // a pinned host is only worth something over verified TLS
 			return
 		}
 		switch t := x.(type) {
+		case bool:
+			if depth == 1 && t && tlsKey(key) {
+				tlsOn = true
+			}
 		case string:
 			urlish := strings.Contains(t, "://") || strings.HasPrefix(t, "//") || strings.Contains(t, `:\`)
-			if !urlish && !endpointKey(key) {
+			if !urlish && !endpointKey(key) && !hostPortRe.MatchString(t) {
 				return
 			}
 			h, good := strictHost(t, urlish)
@@ -394,19 +404,20 @@ func soleHost(v any) string {
 				ok = false
 				return
 			}
+			bare = bare || !urlish
 			hosts[h] = true
 		case map[string]any:
 			for k, e := range t {
-				walk(k, e)
+				walk(k, e, depth+1)
 			}
 		case []any:
 			for _, e := range t {
-				walk(key, e)
+				walk(key, e, depth)
 			}
 		}
 	}
-	walk("", v)
-	if !ok || len(hosts) != 1 {
+	walk("", v, 0)
+	if !ok || len(hosts) != 1 || (bare && !tlsOn) {
 		return ""
 	}
 	for h := range hosts {
@@ -418,13 +429,28 @@ func soleHost(v any) string {
 // endpointKey reports whether a configuration key names where requests go.
 func endpointKey(key string) bool {
 	k := strings.ToLower(key)
-	for _, s := range []string{"url", "uri", "host", "endpoint", "server", "domain", "addr", "base"} {
+	for _, s := range []string{
+		"url", "uri", "host", "endpoint", "server", "domain", "addr", "base",
+		"broker", "bootstrap", "seed", "node", "peer", "dsn", "target",
+	} {
 		if strings.Contains(k, s) {
 			return true
 		}
 	}
 	return false
 }
+
+// tlsKey reports whether a key switches transport security on or off.
+func tlsKey(key string) bool {
+	switch strings.ToLower(key) {
+	case "tls", "ssl", "use_tls", "use_ssl", "tls_enabled", "ssl_enabled", "enable_tls", "secure":
+		return true
+	}
+	return false
+}
+
+// hostPortRe matches a value shaped like host:port, whatever key it sits under.
+var hostPortRe = regexp.MustCompile(`^[^\s/:]+:[0-9]{1,5}$`)
 
 var bareHostRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*(:[0-9]{1,5})?$`)
 
@@ -591,6 +617,8 @@ func weakensTransport(key string, v any) bool {
 		return v != nil
 	}
 	switch {
+	case tlsKey(key):
+		return !truthy() // tls: false sends everything in clear text
 	case strings.Contains(k, "insecure"), strings.Contains(k, "skip_verify"), strings.Contains(k, "skipverify"):
 		return truthy()
 	case k == "verify" || strings.HasSuffix(k, "_verify") || strings.HasPrefix(k, "verify_"):

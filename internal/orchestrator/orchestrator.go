@@ -61,6 +61,13 @@ type ApprovalPayload struct {
 	Comment  string `json:"comment,omitempty"`
 }
 
+// EventPayload is the payload of an "event" envelope: the ingested event that matched
+// a wait's subscription.
+type EventPayload struct {
+	SubscriptionID string         `json:"subscription_id"`
+	Event          map[string]any `json:"event"`
+}
+
 type ChildDonePayload struct {
 	ChildID string            `json:"child_id"`
 	Status  string            `json:"status"`
@@ -258,6 +265,7 @@ func (o *Orchestrator) Flush(ctx context.Context, exe domain.Execution, _ store.
 	}
 	if engine.IsTerminal(exe.Status) {
 		o.closeApprovals(ctx, exe)
+		o.closeSubscriptions(ctx, exe)
 	}
 	if len(done) > 0 {
 		doneSet := map[string]bool{}
@@ -322,6 +330,10 @@ func (o *Orchestrator) carryOut(ctx context.Context, exe domain.Execution, e dom
 		}
 		o.notify("approvals", doc.ID, map[string]any{"execution_id": doc.ExecutionID, "status": doc.Status})
 		return nil
+	case engine.CmdSubscribe:
+		return o.subscribe(ctx, exe, c.Subscribe)
+	case engine.CmdUnsubscribe:
+		return o.unsubscribe(ctx, c.Subscribe.ID, "closed")
 	case engine.CmdStartChild:
 		return o.startChild(ctx, exe, c)
 	case engine.CmdNotifyParent:
@@ -603,6 +615,12 @@ func toEvent(env queue.Envelope, now time.Time) (engine.Event, error) {
 			return ev, err
 		}
 		ev.Type, ev.Approved, ev.Actor, ev.Comment = engine.EvApproval, p.Approved, p.Actor, p.Comment
+	case queue.MsgEvent:
+		var p EventPayload
+		if err := dec(&p); err != nil {
+			return ev, err
+		}
+		ev.Type, ev.Output = engine.EvEvent, p.Event
 	case queue.MsgChildDone:
 		var p ChildDonePayload
 		if err := dec(&p); err != nil {
@@ -675,4 +693,54 @@ func (c *WorkflowCache) LatestPublished(ctx context.Context, name string) (domai
 		return domain.Workflow{}, store.ErrNotFound
 	}
 	return page.Items[0], nil
+}
+
+// subscribe stores a wait's subscription; the processor matches events against it.
+func (o *Orchestrator) subscribe(ctx context.Context, exe domain.Execution, s *engine.Subscription) error {
+	doc := domain.Subscription{
+		Meta: domain.Meta{ID: s.ID}, ExecutionID: s.ExecutionID, WorkflowID: exe.WorkflowID, NodeID: s.NodeID,
+		Partition: exe.Partition, Match: s.Match, With: s.With, Status: "open", DueAt: s.DueAt,
+		ExpiresAt: s.DueAt.Add(24 * time.Hour),
+	}
+	if _, err := o.St.Subscriptions.Create(ctx, doc); err != nil && !errors.Is(err, store.ErrAlreadyExists) {
+		return err
+	}
+	return nil
+}
+
+// unsubscribe closes an open subscription (idempotent; a matched one stays matched).
+func (o *Orchestrator) unsubscribe(ctx context.Context, id, status string) error {
+	_, _, err := o.St.Subscriptions.Update(ctx, id, func(s *domain.Subscription) error {
+		if s.Status == "open" {
+			s.Status = status
+		}
+		return nil
+	})
+	if errors.Is(err, store.ErrNotFound) {
+		return nil
+	}
+	return err
+}
+
+// closeSubscriptions closes the open subscriptions of a finished execution.
+func (o *Orchestrator) closeSubscriptions(ctx context.Context, exe domain.Execution) {
+	page, err := o.St.Subscriptions.List(ctx, store.ListQuery{Terms: map[string][]string{"execution_id": {exe.ID}, "status": {"open"}}, Limit: 200})
+	if err != nil {
+		return
+	}
+	for _, s := range page.Items {
+		_ = o.unsubscribe(ctx, s.ID, "closed")
+	}
+}
+
+// EventMessage resumes the execution of a matched subscription. Its id makes the first
+// match per subscription the only one JetStream accepts within the dedup window; the
+// engine ignores any later one because the node no longer waits.
+func EventMessage(s domain.Subscription, event map[string]any) (queue.Msg, error) {
+	env, err := queue.NewEnvelope(queue.MsgEvent, "event:"+s.ID, s.ExecutionID, s.Partition, EventPayload{SubscriptionID: s.ID, Event: event})
+	if err != nil {
+		return queue.Msg{}, err
+	}
+	env.NodeID = s.NodeID
+	return env.Msg(queue.ResultSubject(s.Partition))
 }

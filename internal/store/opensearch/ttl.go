@@ -21,6 +21,7 @@ func PurgeExpired(ctx context.Context, c *Client, prefix string, now time.Time, 
 	}{
 		{prefix + "-seen", "first_seen", now.Add(-seenTTL)},
 		{prefix + "-idempotency", "expires_at", now},
+		{prefix + "-subscriptions", "expires_at", now},
 	} {
 		query := map[string]any{"range": map[string]any{q.field: map[string]any{"lt": q.cut.UTC().Format(time.RFC3339Nano)}}}
 		n, err := deleteByQueryTask(ctx, c, q.index, query, 2000)

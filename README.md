@@ -16,7 +16,7 @@ One Go binary (`soar`), one image, role chosen by subcommand, plus the Python ru
 | 7 | Worker, built-in actions, Python runner (gRPC, sandbox) | done |
 | 8 | Reliability: retries, idempotency, outbox sweeper, DLQ, leases | done; chaos-tested (processor, worker, orchestrator and NATS kills) |
 | 9 | Security: OIDC + API keys, roles, encrypted secrets, audit, scrubbing, TLS/mTLS, policy | done; `make test-security` passes |
-| 10 | Triggers and waits: cron, approvals, timers; Outlook (Graph) mailbox adapter | partly: syslog, Kafka and file/object adapters and wait-for-event nodes are not built |
+| 10 | Triggers and waits: cron, approvals, timers, wait-for-event; syslog, Kafka and file/object streams; Outlook (Graph) mailbox adapter | done; restart gate passed (kill -9 of every role and NATS) |
 | 11 | Cases and observables: alert -> case -> task, snapshots, evidence | done |
 | 12 | Web UI: dashboard, alerts, cases, workflow editor, executions, approvals, sources, connections, admin | done |
 | 13 | Integration SDK, DFIR-IRIS 2.4.27 and Outlook (Microsoft Graph) | done; endpoints marked *verify* |
@@ -52,7 +52,8 @@ curl -s -H "Authorization: Bearer $SOAR_KEY" localhost:8080/api/v1/me | jq .
 |---|---|---|
 | web | 3000 | React UI; nginx proxies `/api` to the api |
 | api | 8080 | `/api/v1/...` (OIDC or API key), `/healthz`, `/readyz`, `/metrics` |
-| ingest | 8081 | `POST /ingest/{source}` (per-source token or HMAC) |
+| ingest | 8081 | `POST /ingest/{source}` (per-source token or HMAC); `SOAR_INGEST_PUBLISH` in `.env` publishes it on a LAN address for Wazuh push |
+| collector (syslog sources) | 5514 udp/tcp | only when a `syslog` source listens on `:5514` |
 | processor / collector / orchestrator / worker / scheduler | 8082-8086 | health, `/metrics`, `/stats`, inside the compose network |
 | OpenSearch / Dashboards | 9200 / 5601 | security plugin **off** in dev |
 | NATS | 4222, 8222 | JetStream |
@@ -86,6 +87,7 @@ curl -s -H "Authorization: Bearer $SOAR_KEY" localhost:8080/api/v1/me | jq .
 | `SOAR_POLICY_FILE` | no | `/etc/soar/policy.yaml` (`config/policy.yaml`) |
 | `SOAR_INTEGRATIONS_DIR` | no | built-in integration packages |
 | `SOAR_HTTP_ALLOW_LOOPBACK` | no | false (SSRF guard of http.request) |
+| `SOAR_INGEST_DIRS` | collector | none: comma-separated absolute directories `file:///` sources may read (and, with `after: delete`, empty) |
 
 ## Layout
 
@@ -411,8 +413,35 @@ limits throughput" and `make nats-relaxed`.
 ## Step 10: triggers and waits
 
 Cron triggers (`{type: schedule, cron: "*/15 * * * *"}` or `@every 15m`, UTC; a missed slot runs once),
-approval and wait nodes, durable timers, and the `graph_mail` pull adapter for Microsoft 365 mailboxes.
-**Not built yet:** syslog, Kafka/AMQP, file/object and SQL adapters, and wait-for-event nodes.
+approval and wait nodes, durable timers, the `graph_mail` pull adapter for Microsoft 365 mailboxes, waits for
+events, and three stream adapters. **Not built:** AMQP/SQS and SQL adapters.
+
+**Wait for an event.** A `wait` node with `event` instead of `duration`/`until` pauses until an alert stored
+afterwards (any source) matches:
+
+```yaml
+- id: isolated
+  type: wait
+  event:
+    match: 'event.title == "Host isolated" && wait.host in event.entities.hosts'
+    with: { host: 'inputs.host' }      # evaluated once, when the wait starts; read as wait.<name>
+  timeout: 1h                          # default 24h
+  on_timeout: continue                 # default fail
+```
+
+`event` is the normalized alert. The node's output is `{event, received_at}` (`steps.isolated.output.event...`),
+or `{timed_out: true}` with `on_timeout: continue`. The wait is a subscription in `soar-subscriptions`; processors
+reload open subscriptions every 2 s (an alert in the first 2 s after the wait starts can be missed), at most
+10,000 per processor. Subscriptions close when the wait matches, times out or the execution is cancelled, and
+survive restarts.
+
+**Stream sources** run continuously in the collector (`adapter` below, `parser` as for any source):
+
+| Adapter | Config | Notes |
+|---|---|---|
+| `syslog` | `listen` (`:5514`), `protocol` udp, tcp or tls (`tls_cert_file`, `tls_key_file`, `tls_client_ca_file` = mTLS), `max_message_bytes` (64 KiB), `batch_size`, `flush` | Use parser `syslog` (RFC 5424 and 3164). Runs on every collector replica; TCP framing by octet count or newline; TCP pauses the sender when the queue is full, UDP drops are counted. The dev compose publishes 5514 udp/tcp on 127.0.0.1. |
+| `kafka` | `config.connection` (connector `kafka`: `brokers`, `tls`, `ca_file`, `sasl` plain or scram-sha-256/512 with `secret_refs` username and password), `topics`, `group` (default `soar-<source>`), `start` latest or earliest, `max_batch` | Consumer group; offsets are committed only after the batch is queued; re-read records are deduplicated by topic/partition/offset. |
+| `file_object` | `url` `s3://bucket/prefix` (`config.connection` with `endpoint`, `region`, `secret_refs` access_key and secret_key) or `file:///dir`; `after` keep or delete; `max_object_bytes` (64 MiB); `settle` (10 s); needs a `schedule` | One collector replica (lease). `keep` remembers the last key (write keys in increasing order); `delete` removes each object once queued. Local directories must be inside `SOAR_INGEST_DIRS` on the collector. |
 
 ## Step 11: cases and observables
 

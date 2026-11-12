@@ -623,3 +623,87 @@ func TestOverloadRejectionsBeyondLocalRetriesAreHeld(t *testing.T) {
 		t.Errorf("an overload must not cost deliveries: retried=%d dlq=%d", r.p.Stats.Retried.Load(), len(r.dlq.recs))
 	}
 }
+
+// starterLog records published messages; the first `fail` calls fail every message.
+type starterLog struct {
+	mu   sync.Mutex
+	fail int
+	msgs []queue.Msg
+}
+
+func (s *starterLog) PublishMany(_ context.Context, ms []queue.Msg) []error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	errs := make([]error, len(ms))
+	if s.fail > 0 {
+		s.fail--
+		for i := range errs {
+			errs[i] = errors.New("nats: no responders")
+		}
+		return errs
+	}
+	s.msgs = append(s.msgs, ms...)
+	return errs
+}
+
+// Step 10: a stored event that matches an open wait resumes its execution. A failed
+// publish retries the event (never loses the match, never counts it twice); a
+// delivered match marks the subscription matched.
+func TestStoredEventResumesAMatchingWait(t *testing.T) {
+	r := newRig(t)
+	ctx := context.Background()
+	sub := domain.Subscription{
+		Meta: domain.Meta{ID: "sub_1"}, ExecutionID: "exe_1", NodeID: "w", Partition: 3,
+		Match: `event.title == wait.title`, With: domain.JSON{"title": "isolate-me"}, Status: "open", DueAt: time.Now().Add(time.Hour),
+	}
+	if _, err := r.st.Subscriptions.Create(ctx, sub); err != nil {
+		t.Fatal(err)
+	}
+	other := sub
+	other.ID, other.With = "sub_2", domain.JSON{"title": "something else"}
+	if _, err := r.st.Subscriptions.Create(ctx, other); err != nil {
+		t.Fatal(err)
+	}
+	idx, err := NewWaitIndex(r.st, r.p.Log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := idx.Refresh(ctx); err != nil {
+		t.Fatal(err)
+	}
+	starts := &starterLog{fail: 1}
+	r.p.Waits, r.p.Starts = idx, starts
+	e := event("m.1", "isolate-me", "fp-m", 3)
+	r.publish(e, "")
+	r.drain(15 * time.Second)
+
+	starts.mu.Lock()
+	msgs := starts.msgs
+	starts.mu.Unlock()
+	if len(msgs) != 1 || msgs[0].Subject != "results.3" {
+		t.Fatalf("want one event message to results.3, got %+v", msgs)
+	}
+	var env struct {
+		Type        string `json:"type"`
+		ExecutionID string `json:"execution_id"`
+		NodeID      string `json:"node_id"`
+	}
+	_ = json.Unmarshal(msgs[0].Data, &env)
+	if env.Type != "event" || env.ExecutionID != "exe_1" || env.NodeID != "w" {
+		t.Errorf("envelope %+v", env)
+	}
+	if s, _, _ := r.st.Subscriptions.Get(ctx, "sub_1"); s.Status != "matched" || s.MatchedEventID != e.EventID {
+		t.Errorf("subscription %+v", s)
+	}
+	if s, _, _ := r.st.Subscriptions.Get(ctx, "sub_2"); s.Status != "open" {
+		t.Errorf("the non-matching wait changed: %+v", s)
+	}
+	if r.p.Stats.Retried.Load() == 0 {
+		t.Error("the failed publish must retry the event")
+	}
+	for k, d := range r.bulk.docs {
+		if strings.HasPrefix(k, "soar-alerts/") && d["occurrence_count"] != float64(1) {
+			t.Errorf("the retried event was counted twice: %v", d)
+		}
+	}
+}

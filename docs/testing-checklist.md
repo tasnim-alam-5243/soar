@@ -459,7 +459,20 @@ Gate: survives a full restart.
 - [ ] Cron: a workflow with top-level `"triggers":[{"type":"schedule","cron":"@every 1m"}]` runs once a minute.
 - [ ] Approval timeout: `{"type":"approval","timeout":"1m","on_timeout":"reject"}` resolves without anyone acting.
 - [ ] Restart survival: start a `wait` of 5 minutes, `make down && make up`, the execution resumes and finishes on time.
-- [ ] Not built yet (expect nothing): syslog, Kafka/AMQP, file/object, SQL adapters; wait-for-event nodes.
+- [ ] Wait for an event: publish and run a workflow whose first node is
+  `{"id":"w","type":"wait","event":{"match":"event.title == \"Gate test\""},"timeout":"1h"}`; it shows `waiting`.
+  Push a Wazuh alert whose `rule.description` is `Gate test`. **Expect:** the execution finishes and
+  `steps.w.output.event.title` is `Gate test`. An alert with another title changes nothing.
+- [ ] Event wait timeout: same with `"timeout":"1m","on_timeout":"continue"` and no matching alert. **Expect:** after a
+  minute it succeeds with `{"timed_out": true}`.
+- [ ] Syslog: create a source `{"name":"fw-syslog","adapter":"syslog","parser":"syslog","mapping":"<a mapping>","config":{"listen":":5514","protocol":"udp"},"enabled":true}`,
+  `make up`, then `logger -n 127.0.0.1 -P 5514 -d "test from logger"`. **Expect:** the record arrives (an alert, or a
+  failure in `GET /dlq` that names the mapping step if the mapping does not fit syslog fields).
+- [ ] File/object: a `file_object` source with `"url":"s3://<bucket>/incoming/"` and a connection to the dev `s3`
+  service (endpoint `http://s3:9000`, the `S3_*` keys as secrets), `"schedule":"every 10s"`; upload a JSON file under
+  `incoming/`. **Expect:** it becomes an alert within ~10 s; with `"after":"delete"` the object is gone afterwards.
+- [ ] A `file:///etc` source is refused by the collector ("not inside a directory this collector may read").
+- [ ] Not built yet (expect nothing): AMQP/SQS and SQL adapters.
 
 ### Step 11 - Cases and observables
 Gate: alert -> case -> task end to end.
@@ -524,7 +537,7 @@ None open. Fixed on 2026-11-11 (1-2 found while writing this checklist, 3 by the
 ## Not built yet (from the spec; do not expect these to work)
 
 * `POST /sources/{id}/replay` and `POST /filters/simulate` (spec 9.5.1, 11); replay one record at a time with `POST /dlq/{id}/replay`.
-* Syslog, Kafka/AMQP/SQS, file/object and SQL pull adapters; wait-for-event nodes (Step 10).
+* AMQP/SQS and SQL adapters (Step 10).
 * Outlook delta links and change notifications (polling with overlap is used); OpenTelemetry tracing; a Helm chart.
 * Pull overlap above ~330 alerts/s: only the newest 20,000 records of the 60 s window are re-read (`overlap_pages`).
 
