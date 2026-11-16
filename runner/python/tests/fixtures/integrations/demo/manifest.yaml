@@ -1,0 +1,13 @@
+name: demo
+title: Demo integration (runner tests)
+actions:
+  - { id: demo.echo, class: python, entrypoint: "actions/demo.py:echo", description: echo, side_effect: read, risk: low, supports_dry_run: true }
+  - { id: demo.fail, class: python, entrypoint: "actions/demo.py:fail", description: fail, side_effect: read, risk: low, supports_dry_run: true }
+  - { id: demo.crash, class: python, entrypoint: "actions/demo.py:crash", description: crash, side_effect: read, risk: low, supports_dry_run: true }
+  - { id: demo.sleep, class: python, entrypoint: "actions/demo.py:sleep", description: sleep, side_effect: read, risk: low, supports_dry_run: true }
+  - { id: demo.hog, class: python, entrypoint: "actions/demo.py:hog", description: hog, side_effect: read, risk: low, supports_dry_run: true }
+  - { id: demo.leak, class: python, entrypoint: "actions/demo.py:leak", description: leak, side_effect: read, risk: low, supports_dry_run: true }
+  - { id: demo.notjson, class: python, entrypoint: "actions/demo.py:notjson", description: x, side_effect: read, risk: low, supports_dry_run: true }
+  - { id: demo.spin, class: python, entrypoint: "actions/demo.py:spin", description: spin, side_effect: read, risk: low, supports_dry_run: true }
+  - { id: demo.env, class: python, entrypoint: "actions/demo.py:env", description: x, side_effect: read, risk: low, supports_dry_run: true }
+  - { id: demo.escape, class: python, entrypoint: "../../../etc/passwd:x", description: x, side_effect: read, risk: low, supports_dry_run: true }

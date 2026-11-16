@@ -1,0 +1,30 @@
+{
+  "dedup_window_sec": 600,
+  "description": "Oct 29 12:50:00 web01 systemd[1]: foo.service: Failed with result 'exit-code'.",
+  "entities": {
+    "hosts": [
+      "web01"
+    ]
+  },
+  "external_id": "1793256600.11800",
+  "fingerprint": "0a1efab363abcb00e51fb795b083111ffb8dcdb055dcd2ce86a904b14b15ee88",
+  "kind": "alert",
+  "mitre": null,
+  "observables": [
+    {
+      "type": "host",
+      "value": "web01"
+    }
+  ],
+  "occurred_at": "2026-10-29T06:50:00.012Z",
+  "original_severity": "5",
+  "route": "",
+  "severity": 2,
+  "source_id": "wazuh-prod",
+  "system": "wazuh-prod",
+  "tags": [
+    "local",
+    "systemd"
+  ],
+  "title": "Systemd: Service exited due to a failure."
+}

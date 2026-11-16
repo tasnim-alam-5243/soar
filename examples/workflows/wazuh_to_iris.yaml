@@ -1,0 +1,46 @@
+# Wazuh -> DFIR-IRIS: every Wazuh alert above level 7 becomes an IRIS alert.
+#
+# Wazuh pushes alerts of level 5 and up (<level>5</level> in ossec.conf); SOAR stores all of
+# them and this workflow forwards the ones above 7. Repeats of the same alert (same rule,
+# agent, source address or path, target user) within the 10-minute grouping window raise the
+# SOAR alert's occurrence_count and do not create another IRIS alert.
+#
+# Needs one connection with connector dfir_iris (base_url, customer_id, secret api_key).
+# Import and publish: docs/wazuh-iris-guide.md.
+triggers:
+  - type: alert
+    match: 'alert.source_id in ["wazuh-prod", "wazuh-pull"] && int(alert.ext.rule.level) > 7'
+inputs:
+  - name: asset_type        # IRIS asset type for the agent: a name from IRIS > Manage > Asset types
+    default: "Linux - Server"
+  - name: tlp               # TLP of the IOCs: a name from IRIS > Manage > TLP
+    default: "amber"
+nodes:
+  - id: to_iris
+    action: iris.alert.create
+    params:
+      title: '"Wazuh: " + alert.title'
+      description: >-
+        "Wazuh rule " + string(alert.ext.rule.id) + " (level " + string(int(alert.ext.rule.level)) + ") on agent " +
+        alert.ext.agent.name + " (" + string(alert.ext.agent.id) + ")" +
+        (has(alert.description) && alert.description != "" ? "\n\n" + alert.description : "")
+      severity: 'alert.severity'
+      source: '"Wazuh"'
+      source_ref: 'alert.external_id'
+      event_time: 'has(alert.occurred_at) ? string(alert.occurred_at) : ""'
+      source_content: 'alert.ext'
+      note: '"SOAR alert " + alert.id'
+      iocs: >-
+        has(alert.observables)
+          ? alert.observables.filter(o, o.type in ["ip", "user", "hash", "file_path"]).map(o,
+              {"type": o.type, "value": o.value, "tlp": inputs.tlp,
+               "description": "Wazuh " + o.type + (has(o.role) ? " (" + o.role + ")" : "")})
+          : []
+      assets: >-
+        [{"name": alert.ext.agent.name, "type": inputs.asset_type,
+          "ip": has(alert.ext.agent.ip) ? alert.ext.agent.ip : "",
+          "description": "Wazuh agent " + string(alert.ext.agent.id)}]
+      tags: >-
+        ["wazuh"] + (has(alert.tags) ? alert.tags : []) +
+        (has(alert.mitre) && has(alert.mitre.technique_ids) ? alert.mitre.technique_ids : [])
+    retry: { max_attempts: 5, initial: 10s, max: 2m }   # IRIS briefly down or restarting

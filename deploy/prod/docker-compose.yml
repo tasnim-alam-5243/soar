@@ -1,0 +1,188 @@
+# Production stack (spec section 15): the SOAR roles (the api role serves the web UI), the runner and a 3-node NATS
+# JetStream cluster (replicas 3, quorum commit). OpenSearch, S3-compatible object storage and Keycloak are expected to
+# be run as managed services (TLS, backups, their own HA); point the variables in .env at them.
+#
+#   cp deploy/prod/.env.example deploy/prod/.env   # fill in every value
+#   make image
+#   docker compose -f deploy/prod/docker-compose.yml --env-file deploy/prod/.env up -d
+#
+# Every secret is required (${VAR:?}); there are no development defaults here.
+name: soar-prod
+
+x-soar: &soar
+  image: ${SOAR_IMAGE:-soar:dev}
+  restart: unless-stopped
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  logging: { driver: json-file, options: { max-size: "50m", max-file: "5" } }
+  environment: &env
+    SOAR_OS_URLS: ${SOAR_OS_URLS:?set SOAR_OS_URLS (https://opensearch-1:9200,...)}
+    SOAR_OS_USER: ${SOAR_OS_USER:?set SOAR_OS_USER}
+    SOAR_OS_PASSWORD: ${SOAR_OS_PASSWORD:?set SOAR_OS_PASSWORD}
+    SOAR_OS_STATE_REPLICAS: "1"
+    SOAR_OS_TS_REPLICAS: "1"
+    SOAR_NATS_URL: nats://nats-1:4222,nats://nats-2:4222,nats://nats-3:4222
+    SOAR_NATS_REPLICAS: "3"
+    SOAR_EVENTS_MAX_BYTES: "${SOAR_EVENTS_MAX_BYTES:-21474836480}"
+    SOAR_PARTITIONS: "${SOAR_PARTITIONS:-8}"
+    SOAR_PROCESSOR_WORKERS: "${SOAR_PROCESSOR_WORKERS:-4}"
+    SOAR_LOG_LEVEL: info
+    SOAR_BLOB_ENDPOINT: ${SOAR_BLOB_ENDPOINT:?set SOAR_BLOB_ENDPOINT (https://s3.example)}
+    SOAR_BLOB_ACCESS_KEY: ${SOAR_BLOB_ACCESS_KEY:?}
+    SOAR_BLOB_SECRET_KEY: ${SOAR_BLOB_SECRET_KEY:?}
+    SOAR_BLOB_SSE: "${SOAR_BLOB_SSE:-true}"
+    SOAR_MASTER_KEY_ID: ${SOAR_MASTER_KEY_ID:?}
+    SOAR_MASTER_KEY: ${SOAR_MASTER_KEY:?generate with openssl rand -base64 32 and keep it in a vault}
+    SOAR_OLD_MASTER_KEYS: ${SOAR_OLD_MASTER_KEYS:-}
+    SOAR_POLICY_FILE: /etc/soar/policy.yaml
+    # TLS (Step 9): put the PEM files in deploy/prod/certs (mounted at /etc/soar/certs) and name them here.
+    SOAR_OS_CA_FILE: ${SOAR_OS_CA_FILE:-}
+    SOAR_OS_CERT_FILE: ${SOAR_OS_CERT_FILE:-}
+    SOAR_OS_KEY_FILE: ${SOAR_OS_KEY_FILE:-}
+    SOAR_NATS_CA_FILE: ${SOAR_NATS_CA_FILE:-}
+    SOAR_NATS_CERT_FILE: ${SOAR_NATS_CERT_FILE:-}
+    SOAR_NATS_KEY_FILE: ${SOAR_NATS_KEY_FILE:-}
+    SOAR_TLS_CERT_FILE: ${SOAR_TLS_CERT_FILE:-}
+    SOAR_TLS_KEY_FILE: ${SOAR_TLS_KEY_FILE:-}
+    SOAR_TLS_CLIENT_CA_FILE: ${SOAR_TLS_CLIENT_CA_FILE:-}
+  volumes:
+    - ../../config/policy.yaml:/etc/soar/policy.yaml:ro,z
+    - ../../config/retention.yaml:/etc/soar/retention.yaml:ro,z
+    - ./certs:/etc/soar/certs:ro,z
+  depends_on:
+    migrate: { condition: service_completed_successfully }
+  deploy:
+    resources: { limits: { cpus: "2", memory: 1g } }
+
+x-nats: &nats
+  image: nats:2.11-alpine
+  restart: unless-stopped
+  logging: { driver: json-file, options: { max-size: "50m", max-file: "5" } }
+  healthcheck:
+    test: ["CMD-SHELL", "wget -q -O /dev/null 'http://127.0.0.1:8222/healthz?js-enabled-only=true' || exit 1"]
+    interval: 5s
+    timeout: 3s
+    retries: 30
+
+services:
+  nats-1:
+    <<: *nats
+    command: ["-js", "-sd", "/data", "--name", "nats-1", "--cluster_name", "soar", "--cluster", "nats://0.0.0.0:6222",
+              "--routes", "nats://nats-2:6222,nats://nats-3:6222", "-m", "8222"]
+    volumes: [nats-1:/data]
+  nats-2:
+    <<: *nats
+    command: ["-js", "-sd", "/data", "--name", "nats-2", "--cluster_name", "soar", "--cluster", "nats://0.0.0.0:6222",
+              "--routes", "nats://nats-1:6222,nats://nats-3:6222", "-m", "8222"]
+    volumes: [nats-2:/data]
+  nats-3:
+    <<: *nats
+    command: ["-js", "-sd", "/data", "--name", "nats-3", "--cluster_name", "soar", "--cluster", "nats://0.0.0.0:6222",
+              "--routes", "nats://nats-1:6222,nats://nats-2:6222", "-m", "8222"]
+    volumes: [nats-3:/data]
+
+  migrate:
+    <<: *soar
+    restart: "no"
+    command: ["migrate"]
+    depends_on:
+      nats-1: { condition: service_healthy }
+      nats-2: { condition: service_healthy }
+      nats-3: { condition: service_healthy }
+
+  api:
+    <<: *soar
+    command: ["api"]
+    environment:
+      <<: *env
+      SOAR_OIDC_ISSUER: ${SOAR_OIDC_ISSUER:?set SOAR_OIDC_ISSUER (https://sso.example/realms/soar)}
+      SOAR_OIDC_AUDIENCE: ${SOAR_OIDC_AUDIENCE:-soar-api}
+      SOAR_BOOTSTRAP_API_KEY: ${SOAR_BOOTSTRAP_API_KEY:-}
+      SOAR_UI_OIDC_CLIENT_ID: ${SOAR_OIDC_WEB_CLIENT:-soar-web}   # the UI signs in at SOAR_OIDC_ISSUER
+    # The api role serves the REST API and the web UI. Put a TLS-terminating proxy in front: OIDC
+    # login in the browser needs HTTPS. One replica per host port; to scale, run more api
+    # services behind a load balancer (live updates reach every replica through NATS).
+    ports: ["${SOAR_API_BIND:-127.0.0.1}:8080:8080"]
+    deploy: { resources: { limits: { cpus: "2", memory: 1g } } }
+    healthcheck: &hc
+      test: ["CMD", "/soar", "healthcheck", "http://127.0.0.1:8080/readyz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  ingest:
+    <<: *soar
+    command: ["ingest"]
+    ports: ["${SOAR_INGEST_BIND:-0.0.0.0}:8081:8081"]   # put a TLS-terminating proxy in front
+    # one replica per host port; to scale, run more ingest services behind a load balancer
+    deploy: { resources: { limits: { cpus: "2", memory: 512m } } }
+    healthcheck: { <<: *hc, test: ["CMD", "/soar", "healthcheck", "http://127.0.0.1:8081/readyz"] }
+
+  processor:
+    <<: *soar
+    command: ["processor"]
+    deploy: { replicas: 3, resources: { limits: { cpus: "2", memory: 1g } } }
+    healthcheck: { <<: *hc, test: ["CMD", "/soar", "healthcheck", "http://127.0.0.1:8082/readyz"] }
+
+  collector:
+    <<: *soar
+    command: ["collector"]
+    deploy: { replicas: 2 }   # one lease per source keeps them from polling twice
+    healthcheck: { <<: *hc, test: ["CMD", "/soar", "healthcheck", "http://127.0.0.1:8083/readyz"] }
+
+  orchestrator:
+    <<: *soar
+    command: ["orchestrator"]
+    deploy: { replicas: 2 }
+    healthcheck: { <<: *hc, test: ["CMD", "/soar", "healthcheck", "http://127.0.0.1:8084/readyz"] }
+
+  worker:
+    <<: *soar
+    command: ["worker"]
+    environment:
+      <<: *env
+      SOAR_RUNNER_ADDR: runner:50051
+      # mTLS to the runner (decrypted connection secrets cross this channel); see docs/runbooks.md "TLS and mTLS"
+      SOAR_RUNNER_CA_FILE: ${SOAR_RUNNER_CA_FILE:-}
+      SOAR_RUNNER_CERT_FILE: ${SOAR_RUNNER_CERT_FILE:-}
+      SOAR_RUNNER_KEY_FILE: ${SOAR_RUNNER_KEY_FILE:-}
+      SOAR_RUNNER_INSECURE: "${SOAR_RUNNER_INSECURE:-false}"
+      SOAR_WORKER_CONCURRENCY: "${SOAR_WORKER_CONCURRENCY:-32}"
+    networks: [default, runner]
+    deploy: { replicas: 2, resources: { limits: { cpus: "2", memory: 1g } } }
+    healthcheck: { <<: *hc, test: ["CMD", "/soar", "healthcheck", "http://127.0.0.1:8085/readyz"] }
+
+  scheduler:
+    <<: *soar
+    command: ["scheduler"]
+    deploy: { replicas: 2 }   # leader-elected
+    healthcheck: { <<: *hc, test: ["CMD", "/soar", "healthcheck", "http://127.0.0.1:8086/readyz"] }
+
+  runner:
+    image: ${SOAR_RUNNER_IMAGE:-soar-runner:dev}
+    restart: unless-stopped
+    read_only: true
+    tmpfs: ["/tmp:size=128m,mode=1777"]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    environment:
+      SOAR_RUNNER_WORKERS: "32"
+      SOAR_RUNNER_TLS_CERT_FILE: ${SOAR_RUNNER_TLS_CERT_FILE:-}
+      SOAR_RUNNER_TLS_KEY_FILE: ${SOAR_RUNNER_TLS_KEY_FILE:-}
+      SOAR_RUNNER_TLS_CLIENT_CA_FILE: ${SOAR_RUNNER_TLS_CLIENT_CA_FILE:-}
+      HTTPS_PROXY: ${RUNNER_HTTPS_PROXY:?route integration egress through an allowlisting proxy (spec 10)}
+      NO_PROXY: ""
+    volumes: ["./certs:/etc/soar/certs:ro,z"]
+    networks: [runner, egress]
+    deploy: { replicas: 2, resources: { limits: { cpus: "4", memory: 2g } } }
+
+networks:
+  default: {}
+  runner: { internal: true }
+  egress: {}
+
+volumes:
+  nats-1:
+  nats-2:
+  nats-3:

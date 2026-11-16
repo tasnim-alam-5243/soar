@@ -1,0 +1,52 @@
+{
+  "dedup_window_sec": 600,
+  "description": "Oct 29 12:51:40 web01 sshd[2211]: pam_unix(sshd:session): session opened for user root(uid=0) by (uid=0)",
+  "entities": {
+    "hosts": [
+      "web01"
+    ],
+    "users": [
+      "root"
+    ]
+  },
+  "external_id": "1793256700.12000",
+  "fingerprint": "898afc588454b6bb71e22d18bbc0c8d9a31e3833e0d2580226925648c0925812",
+  "kind": "alert",
+  "mitre": {
+    "tactics": [
+      "Defense Evasion",
+      "Persistence",
+      "Privilege Escalation",
+      "Initial Access"
+    ],
+    "technique_ids": [
+      "T1078"
+    ],
+    "techniques": [
+      "Valid Accounts"
+    ]
+  },
+  "observables": [
+    {
+      "type": "host",
+      "value": "web01"
+    },
+    {
+      "role": "target",
+      "type": "user",
+      "value": "root"
+    }
+  ],
+  "occurred_at": "2026-10-29T06:51:40.333Z",
+  "original_severity": "3",
+  "route": "",
+  "severity": 1,
+  "source_id": "wazuh-prod",
+  "system": "wazuh-prod",
+  "tags": [
+    "pam",
+    "syslog",
+    "authentication_success"
+  ],
+  "title": "PAM: Login session opened."
+}

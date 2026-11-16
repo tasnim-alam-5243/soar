@@ -2,7 +2,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
@@ -11,6 +15,7 @@ import (
 	"os"
 	"os/signal"
 	"sort"
+	"strings"
 	"syscall"
 	"time"
 
@@ -22,6 +27,7 @@ import (
 	"github.com/yourorg/soar/internal/orchestrator"
 	"github.com/yourorg/soar/internal/processor"
 	"github.com/yourorg/soar/internal/scheduler"
+	"github.com/yourorg/soar/internal/seed"
 	"github.com/yourorg/soar/internal/service"
 	"github.com/yourorg/soar/internal/worker"
 )
@@ -32,15 +38,17 @@ var commands = map[string]struct {
 	run  runFunc
 	help string
 }{
-	"api":           {api.Run, "REST API, auth, CRUD, search"},
-	"ingest":        {ingest.Run, "HTTP push receiver (never waits on OpenSearch)"},
-	"collector":     {collector.Run, "pull and stream adapters; owns cursors"},
-	"processor":     {processor.Run, "consume EVENTS: dedup, bulk-write, match triggers"},
-	"orchestrator":  {orchestrator.Run, "advance executions"},
-	"worker":        {worker.Run, "run actions, write step results"},
-	"scheduler":     {scheduler.Run, "cron, pollers, timers, recovery (leader-elected)"},
-	"migrate":       {service.Migrate, "create/update index templates, indices and retention policies (run once, then exit)"},
-	"migrate-check": {service.MigrateCheck, "verify the live indices against the schema; changes nothing"},
+	"api":            {api.Run, "REST API, auth, CRUD, search"},
+	"ingest":         {ingest.Run, "HTTP push receiver (never waits on OpenSearch)"},
+	"collector":      {collector.Run, "pull and stream adapters; owns cursors"},
+	"processor":      {processor.Run, "consume EVENTS: dedup, bulk-write, match triggers"},
+	"orchestrator":   {orchestrator.Run, "advance executions"},
+	"worker":         {worker.Run, "run actions, write step results"},
+	"scheduler":      {scheduler.Run, "cron, pollers, timers, recovery (leader-elected)"},
+	"migrate":        {service.Migrate, "create/update index templates, indices and retention policies (run once, then exit)"},
+	"seed":           {seed.Run, "install the built-in source packs (Wazuh), then exit; idempotent"},
+	"migrate-check":  {service.MigrateCheck, "verify the live indices against the schema; changes nothing"},
+	"rotate-secrets": {service.RotateSecrets, "re-wrap every stored secret with the active master key, then exit"},
 }
 
 func main() { os.Exit(run(os.Args[1:], os.Stdout, os.Stderr)) }
@@ -102,6 +110,19 @@ func healthcheck(args []string, stdout, stderr io.Writer) int {
 	if len(args) > 0 {
 		url = args[0]
 	}
+	// When the role serves HTTPS (SOAR_TLS_CERT_FILE), the compose healthchecks keep
+	// their http:// URLs: the probe switches to https and accepts exactly the role's own
+	// certificate (pinned), so it works for certificates without a 127.0.0.1 name.
+	client := http.DefaultClient
+	if certFile := os.Getenv("SOAR_TLS_CERT_FILE"); certFile != "" {
+		url = strings.Replace(url, "http://", "https://", 1)
+		pinned, err := pinnedClient(certFile)
+		if err != nil {
+			fmt.Fprintln(stderr, err)
+			return 2
+		}
+		client = pinned
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -109,7 +130,7 @@ func healthcheck(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, err)
 		return 2
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1
@@ -136,4 +157,29 @@ func usage(w io.Writer) {
 	fmt.Fprintln(w, "  healthcheck    probe a URL and exit 0 if HTTP 200 (for container health checks)")
 	fmt.Fprintln(w, "  version        print version")
 	fmt.Fprintln(w, "\nconfiguration is read from SOAR_* environment variables (see .env.example)")
+}
+
+// pinnedClient trusts exactly the leaf certificate in certFile (the role's own
+// SOAR_TLS_CERT_FILE): chain and host name checks are replaced by a byte comparison.
+func pinnedClient(certFile string) (*http.Client, error) {
+	pemBytes, err := os.ReadFile(certFile)
+	if err != nil {
+		return nil, err
+	}
+	block, _ := pem.Decode(pemBytes)
+	if block == nil || block.Type != "CERTIFICATE" {
+		return nil, fmt.Errorf("%s: no PEM certificate", certFile)
+	}
+	want := block.Bytes
+	tc := &tls.Config{
+		MinVersion:         tls.VersionTLS12,
+		InsecureSkipVerify: true, //nolint:gosec // replaced by the pin check below
+		VerifyPeerCertificate: func(raw [][]byte, _ [][]*x509.Certificate) error {
+			if len(raw) == 0 || !bytes.Equal(raw[0], want) {
+				return errors.New("the server's certificate is not the one in SOAR_TLS_CERT_FILE")
+			}
+			return nil
+		},
+	}
+	return &http.Client{Transport: &http.Transport{TLSClientConfig: tc}}, nil
 }

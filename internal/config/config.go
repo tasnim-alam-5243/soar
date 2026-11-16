@@ -3,11 +3,14 @@
 package config
 
 import (
+	"crypto/tls"
+	"encoding/base64"
 	"fmt"
 	"log/slog"
 	"net"
 	"net/url"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -44,6 +47,50 @@ type Config struct {
 	StateReplicas int    // replicas for state indices: 0 on one dev node, 1 in production
 	TSReplicas    int    // replicas for time-series indices
 	RetentionFile string // retention.yaml (spec section 5.2)
+
+	// Step 5: queue and processing.
+	EventsMaxBytes   int64 // EVENTS stream size cap; a full stream makes ingest answer 503
+	NATSReplicas     int   // stream replicas: 1 in dev, 3 in production
+	ProcessorWorkers int   // concurrent fetch loops per processor
+
+	// Step 7: actions, runner, object storage.
+	RunnerAddr        string      // Python runner gRPC address (host:port); empty disables python actions
+	RunnerTLS         *tls.Config // TLS (mTLS with a client certificate) to the runner; nil: plaintext
+	RunnerInsecure    bool        // plaintext to a runner that is not on this host (private network only)
+	BlobEndpoint      string      // S3-compatible endpoint; empty uses BlobDir (or no object storage)
+	BlobAccessKey     string      // secret
+	BlobSecretKey     string      // secret
+	BlobRegion        string      // default us-east-1
+	BlobSSE           bool        // request server-side encryption
+	BlobDir           string      // filesystem object store for single-node development
+	WorkerPriorities  []string    // priorities this worker serves (default all)
+	WorkerClasses     []string    // action classes this worker serves (default all)
+	WorkerConcurrency int         // steps in flight for the normal priority (critical gets half, bulk a quarter)
+	HTTPAllowLoopback bool        // let http.request reach loopback addresses (tests, local integrations)
+	IntegrationsDir   string      // load integration packages from disk instead of the built-in ones
+	PolicyFile        string      // action policy rules (spec 20.1); missing file = defaults
+
+	// Step 9: security.
+	MasterKeyID     string // id of the secret-encryption master key (rotation)
+	MasterKey       []byte // 32 bytes, from base64 SOAR_MASTER_KEY
+	OldMasterKeys   map[string][]byte
+	OIDCIssuer      string
+	OIDCAudience    string
+	OIDCJWKSURL     string // optional; discovered from the issuer when empty
+	AuthDisabled    bool   // development only: every request acts as an admin
+	BootstrapKey    string // optional first admin API key (hashed on first start)
+	CORSOrigins     []string
+	UIEnabled       bool        // the api role serves the embedded web UI at / (default true)
+	UIOIDCAuthority string      // OIDC authority the browser signs in with (default SOAR_OIDC_ISSUER)
+	UIOIDCClientID  string      // OIDC client id of the web UI (default soar-web)
+	OSTLS           *tls.Config // OpenSearch client TLS (nil: system roots)
+	NATSTLS         *tls.Config // NATS client TLS (nil: plain, or system roots for tls:// URLs)
+	ServerTLS       *tls.Config // HTTPS for the role's own port (nil: plain HTTP)
+	ClientCertReq   bool        // ServerTLS requires client certificates (mTLS)
+
+	// Step 10: ingest.
+	IngestDirs     []string // directories file_object sources may read on the collector (none by default)
+	StreamCertsDir string   // certificate/key files sources and connections may name (default /etc/soar/certs)
 }
 
 // ValidationError lists every invalid setting.
@@ -65,7 +112,10 @@ func Load(lookup func(string) (string, bool)) (Config, error) {
 		return strings.TrimSpace(v)
 	}
 
-	c := Config{Partitions: 8, LogLevel: slog.LevelInfo, IndexPrefix: "soar", RetentionFile: "/etc/soar/retention.yaml"}
+	c := Config{
+		Partitions: 8, LogLevel: slog.LevelInfo, IndexPrefix: "soar", RetentionFile: "/etc/soar/retention.yaml",
+		EventsMaxBytes: 20 << 30, NATSReplicas: 1, ProcessorWorkers: 2,
+	}
 
 	c.OSURLs = splitList(get("SOAR_OS_URLS"))
 	if len(c.OSURLs) == 0 {
@@ -149,11 +199,194 @@ func Load(lookup func(string) (string, bool)) (Config, error) {
 	if v := get("SOAR_RETENTION_FILE"); v != "" {
 		c.RetentionFile = v
 	}
+	if v := get("SOAR_EVENTS_MAX_BYTES"); v != "" {
+		n, err := strconv.ParseInt(v, 10, 64)
+		if err != nil || n < 1<<20 {
+			bad("SOAR_EVENTS_MAX_BYTES must be a number of bytes of at least 1048576, got %q", v)
+		} else {
+			c.EventsMaxBytes = n
+		}
+	}
+	for _, r := range []struct {
+		key      string
+		dst      *int
+		min, max int
+	}{{"SOAR_NATS_REPLICAS", &c.NATSReplicas, 1, 5}, {"SOAR_PROCESSOR_WORKERS", &c.ProcessorWorkers, 1, 64}} {
+		if v := get(r.key); v != "" {
+			n, err := strconv.Atoi(v)
+			if err != nil || n < r.min || n > r.max {
+				bad("%s must be an integer from %d to %d, got %q", r.key, r.min, r.max, v)
+			} else {
+				*r.dst = n
+			}
+		}
+	}
+
+	// Step 7
+	c.RunnerAddr = get("SOAR_RUNNER_ADDR")
+	c.RunnerInsecure = boolEnv(get("SOAR_RUNNER_INSECURE"), false, "SOAR_RUNNER_INSECURE", bad)
+	if t, err := clientTLS(get("SOAR_RUNNER_CA_FILE"), get("SOAR_RUNNER_CERT_FILE"), get("SOAR_RUNNER_KEY_FILE"), false, "SOAR_RUNNER"); err != nil {
+		bad("%v", err)
+	} else {
+		c.RunnerTLS = t
+	}
+	if c.RunnerAddr != "" {
+		host, _, err := net.SplitHostPort(c.RunnerAddr)
+		switch {
+		case err != nil:
+			bad("SOAR_RUNNER_ADDR must look like host:port, got %q", c.RunnerAddr)
+		case c.RunnerTLS == nil && !c.RunnerInsecure && !isLoopback(host):
+			// the worker sends decrypted connection secrets to the runner
+			bad("SOAR_RUNNER_ADDR %s is not on this host: set SOAR_RUNNER_CA_FILE (plus SOAR_RUNNER_CERT_FILE/SOAR_RUNNER_KEY_FILE for mTLS), "+
+				"or SOAR_RUNNER_INSECURE=true if the runner network is private (the secrets cross it in plain text)", c.RunnerAddr)
+		}
+	}
+	c.BlobEndpoint = get("SOAR_BLOB_ENDPOINT")
+	c.BlobAccessKey = get("SOAR_BLOB_ACCESS_KEY")
+	c.BlobSecretKey = get("SOAR_BLOB_SECRET_KEY")
+	c.BlobRegion = get("SOAR_BLOB_REGION")
+	c.BlobDir = get("SOAR_BLOB_DIR")
+	c.BlobSSE = boolEnv(get("SOAR_BLOB_SSE"), false, "SOAR_BLOB_SSE", bad)
+	if c.BlobEndpoint != "" {
+		if err := checkURL(c.BlobEndpoint, "http", "https"); err != nil {
+			bad("SOAR_BLOB_ENDPOINT: %v", err)
+		}
+		if c.BlobAccessKey == "" || c.BlobSecretKey == "" {
+			bad("SOAR_BLOB_ACCESS_KEY and SOAR_BLOB_SECRET_KEY are required with SOAR_BLOB_ENDPOINT")
+		}
+	}
+	c.WorkerPriorities = splitList(get("SOAR_WORKER_PRIORITIES"))
+	for _, p := range c.WorkerPriorities {
+		if p != "critical" && p != "normal" && p != "bulk" {
+			bad("SOAR_WORKER_PRIORITIES: %q is not critical, normal or bulk", p)
+		}
+	}
+	c.WorkerClasses = splitList(get("SOAR_WORKER_CLASSES"))
+	for _, p := range c.WorkerClasses {
+		if p != "builtin" && p != "python" {
+			bad("SOAR_WORKER_CLASSES: %q is not builtin or python", p)
+		}
+	}
+	c.WorkerConcurrency = 16
+	if v := get("SOAR_WORKER_CONCURRENCY"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 || n > 1024 {
+			bad("SOAR_WORKER_CONCURRENCY must be an integer from 1 to 1024, got %q", v)
+		} else {
+			c.WorkerConcurrency = n
+		}
+	}
+	c.HTTPAllowLoopback = boolEnv(get("SOAR_HTTP_ALLOW_LOOPBACK"), false, "SOAR_HTTP_ALLOW_LOOPBACK", bad)
+	c.IntegrationsDir = get("SOAR_INTEGRATIONS_DIR")
+	c.PolicyFile = "/etc/soar/policy.yaml"
+	if v := get("SOAR_POLICY_FILE"); v != "" {
+		c.PolicyFile = v
+	}
+
+	// Step 10: local directories file:// sources may read (and, with after: delete, empty)
+	for _, d := range splitList(get("SOAR_INGEST_DIRS")) {
+		if !filepath.IsAbs(d) || filepath.Clean(d) == "/" {
+			bad("SOAR_INGEST_DIRS: %q must be an absolute directory other than /", d)
+			continue
+		}
+		c.IngestDirs = append(c.IngestDirs, filepath.Clean(d))
+	}
+	// certificate and key files stream sources and connections may name (syslog tls_*_file,
+	// kafka ca_file); nothing outside it is read
+	c.StreamCertsDir = "/etc/soar/certs"
+	if v := get("SOAR_STREAM_CERTS_DIR"); v != "" {
+		if !filepath.IsAbs(v) || filepath.Clean(v) == "/" {
+			bad("SOAR_STREAM_CERTS_DIR: %q must be an absolute directory other than /", v)
+		} else {
+			c.StreamCertsDir = filepath.Clean(v)
+		}
+	}
+
+	// Step 9
+	c.MasterKeyID = get("SOAR_MASTER_KEY_ID")
+	if v := get("SOAR_MASTER_KEY"); v != "" {
+		k, err := base64.StdEncoding.DecodeString(v)
+		if err != nil || len(k) != 32 {
+			bad("SOAR_MASTER_KEY must be 32 random bytes in base64 (openssl rand -base64 32)")
+		} else {
+			c.MasterKey = k
+		}
+		if c.MasterKeyID == "" {
+			c.MasterKeyID = "k1"
+		}
+	}
+	c.OldMasterKeys = map[string][]byte{}
+	for _, kv := range splitList(get("SOAR_OLD_MASTER_KEYS")) { // id:base64,id:base64 (rotation)
+		id, val, ok := strings.Cut(kv, ":")
+		k, err := base64.StdEncoding.DecodeString(val)
+		if !ok || id == "" || err != nil || len(k) != 32 {
+			bad("SOAR_OLD_MASTER_KEYS entries must look like id:<32 bytes base64>")
+			continue
+		}
+		c.OldMasterKeys[id] = k
+	}
+	c.OIDCIssuer = get("SOAR_OIDC_ISSUER")
+	c.OIDCAudience = get("SOAR_OIDC_AUDIENCE")
+	c.OIDCJWKSURL = get("SOAR_OIDC_JWKS_URL")
+	if c.OIDCIssuer != "" {
+		if err := checkURL(c.OIDCIssuer, "http", "https"); err != nil {
+			bad("SOAR_OIDC_ISSUER: %v", err)
+		}
+		if c.OIDCAudience == "" {
+			bad("SOAR_OIDC_AUDIENCE is required with SOAR_OIDC_ISSUER")
+		}
+	}
+	c.AuthDisabled = boolEnv(get("SOAR_AUTH_DISABLED"), false, "SOAR_AUTH_DISABLED", bad)
+	c.BootstrapKey = get("SOAR_BOOTSTRAP_API_KEY")
+	if c.BootstrapKey != "" && (len(c.BootstrapKey) < 37 || !strings.HasPrefix(c.BootstrapKey, "soar_")) {
+		bad("SOAR_BOOTSTRAP_API_KEY must start with soar_ and have at least 32 random characters after it")
+	}
+	c.CORSOrigins = splitList(get("SOAR_CORS_ORIGINS"))
+	c.UIEnabled = boolEnv(get("SOAR_UI_ENABLED"), true, "SOAR_UI_ENABLED", bad)
+	c.UIOIDCAuthority = get("SOAR_UI_OIDC_AUTHORITY")
+	if c.UIOIDCAuthority == "" {
+		c.UIOIDCAuthority = c.OIDCIssuer
+	}
+	if c.UIOIDCAuthority != "" {
+		if err := checkURL(c.UIOIDCAuthority, "http", "https"); err != nil {
+			bad("SOAR_UI_OIDC_AUTHORITY: %v", err)
+		}
+	}
+	c.UIOIDCClientID = get("SOAR_UI_OIDC_CLIENT_ID")
+	if c.UIOIDCClientID == "" {
+		c.UIOIDCClientID = "soar-web"
+	}
+
+	var err error
+	if c.OSTLS, err = clientTLS(get("SOAR_OS_CA_FILE"), get("SOAR_OS_CERT_FILE"), get("SOAR_OS_KEY_FILE"),
+		boolEnv(get("SOAR_OS_INSECURE"), false, "SOAR_OS_INSECURE", bad), "SOAR_OS"); err != nil {
+		bad("%v", err)
+	}
+	if c.NATSTLS, err = clientTLS(get("SOAR_NATS_CA_FILE"), get("SOAR_NATS_CERT_FILE"), get("SOAR_NATS_KEY_FILE"), false, "SOAR_NATS"); err != nil {
+		bad("%v", err)
+	}
+	if c.ServerTLS, err = serverTLS(get("SOAR_TLS_CERT_FILE"), get("SOAR_TLS_KEY_FILE"), get("SOAR_TLS_CLIENT_CA_FILE")); err != nil {
+		bad("%v", err)
+	}
+	c.ClientCertReq = c.ServerTLS != nil && c.ServerTLS.ClientCAs != nil
 
 	if len(problems) > 0 {
 		return c, &ValidationError{Problems: problems}
 	}
 	return c, nil
+}
+
+func boolEnv(v string, def bool, name string, bad func(string, ...any)) bool {
+	switch strings.ToLower(v) {
+	case "":
+		return def
+	case "1", "true", "yes", "on":
+		return true
+	case "0", "false", "no", "off":
+		return false
+	}
+	bad("%s must be true or false, got %q", name, v)
+	return def
 }
 
 // AddrFor returns the HTTP listen address for a role.
@@ -180,7 +413,53 @@ func (c Config) LogValue() slog.Value {
 		slog.Int("state_replicas", c.StateReplicas),
 		slog.Int("ts_replicas", c.TSReplicas),
 		slog.String("retention_file", c.RetentionFile),
+		slog.Int64("events_max_bytes", c.EventsMaxBytes),
+		slog.Int("nats_replicas", c.NATSReplicas),
+		slog.Int("processor_workers", c.ProcessorWorkers),
+		slog.String("runner_addr", c.RunnerAddr),
+		slog.String("runner_tls", tlsMode(c.RunnerTLS)),
+		slog.String("blob_endpoint", Redact(c.BlobEndpoint)),
+		slog.Bool("blob_credentials", c.BlobAccessKey != ""),
+		slog.String("blob_dir", c.BlobDir),
+		slog.Any("worker_priorities", c.WorkerPriorities),
+		slog.Any("worker_classes", c.WorkerClasses),
+		slog.Int("worker_concurrency", c.WorkerConcurrency),
+		slog.Any("ingest_dirs", c.IngestDirs),
+		slog.String("stream_certs_dir", c.StreamCertsDir),
+		slog.Bool("master_key", len(c.MasterKey) > 0),
+		slog.String("master_key_id", c.MasterKeyID),
+		slog.String("oidc_issuer", c.OIDCIssuer),
+		slog.Bool("auth_disabled", c.AuthDisabled),
+		slog.Bool("ui_enabled", c.UIEnabled),
+		slog.String("ui_oidc_authority", c.UIOIDCAuthority),
+		slog.String("os_tls", tlsMode(c.OSTLS)),
+		slog.String("nats_tls", tlsMode(c.NATSTLS)),
+		slog.String("http_tls", serverMode(c.ServerTLS, c.ClientCertReq)),
 	)
+}
+
+func tlsMode(t *tls.Config) string {
+	switch {
+	case t == nil:
+		return "default"
+	case t.InsecureSkipVerify:
+		return "insecure (verification off)"
+	case len(t.Certificates) > 0:
+		return "custom CA + client certificate"
+	default:
+		return "custom CA"
+	}
+}
+
+func serverMode(t *tls.Config, mtls bool) string {
+	switch {
+	case t == nil:
+		return "off"
+	case mtls:
+		return "https + client certificates"
+	default:
+		return "https"
+	}
 }
 
 func splitList(s string) []string {

@@ -2,6 +2,8 @@ package domain
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"strings"
 	"time"
@@ -55,4 +57,18 @@ func NewID(prefix string) string { return prefix + "_" + NewULID(time.Now().UTC(
 // HasPrefix reports whether id looks like "<prefix>_<26 chars>".
 func HasPrefix(id, prefix string) bool {
 	return strings.HasPrefix(id, prefix+"_") && len(id) == len(prefix)+1+26
+}
+
+// DeterministicID builds "<prefix>_<26 hex chars>" from the given parts, so a document
+// with a natural key (a source name, a workflow name and version) gets the same ID
+// every time and a second create fails atomically instead of making a duplicate.
+func DeterministicID(prefix string, parts ...any) string {
+	h := sha256.New()
+	for i, p := range parts {
+		if i > 0 {
+			h.Write([]byte{0})
+		}
+		fmt.Fprint(h, p)
+	}
+	return prefix + "_" + hex.EncodeToString(h.Sum(nil))[:26]
 }

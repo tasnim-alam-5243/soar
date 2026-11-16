@@ -1,0 +1,3 @@
+name: ignored_decoders
+description: Wazuh decoder names to drop before mapping.
+items: []

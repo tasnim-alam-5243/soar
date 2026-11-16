@@ -244,8 +244,14 @@ func (r *Repo[T]) List(_ context.Context, q store.ListQuery) (store.Page[T], err
 }
 
 func matches(m map[string]any, q store.ListQuery) bool {
+	if q.Search != "" && len(q.SearchFields) > 0 && !textMatches(m, q.Search, q.SearchFields) {
+		return false
+	}
 	for field, want := range q.Terms {
 		got := valuesOf(lookup(m, field))
+		if len(got) == 0 && q.MissingOK(field) {
+			continue
+		}
 		ok := false
 		for _, g := range got {
 			for _, w := range want {
@@ -271,6 +277,110 @@ func matches(m map[string]any, q store.ListQuery) bool {
 		}
 	}
 	return true
+}
+
+// textMatches approximates simple_query_string with default_operator AND: every word of
+// text must occur (case-insensitive substring) in at least one of the fields.
+func textMatches(m map[string]any, text string, fields []string) bool {
+	var hay []string
+	for _, f := range fields {
+		for _, v := range valuesOf(lookup(m, strings.TrimSuffix(f, ".raw"))) {
+			hay = append(hay, strings.ToLower(v))
+		}
+	}
+	for _, w := range strings.Fields(strings.ToLower(text)) {
+		w = strings.Trim(w, `"*+-|()~`)
+		if w == "" {
+			continue
+		}
+		found := false
+		for _, h := range hay {
+			if strings.Contains(h, w) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
+}
+
+// Histogram implements store.Aggregator.
+func (r *Repo[T]) Histogram(_ context.Context, q store.ListQuery, field string, from, to time.Time, interval time.Duration, split string) ([]store.TimeBucket, error) {
+	start := store.BucketStart(from, interval)
+	var res []store.TimeBucket
+	for t := start; !t.After(to); t = t.Add(interval) {
+		res = append(res, store.TimeBucket{Start: t, Counts: map[string]int64{}})
+		if split == "" {
+			res[len(res)-1].Counts[""] = 0
+		}
+	}
+	err := r.each(q, func(m map[string]any) {
+		s, ok := lookup(m, field).(string)
+		if !ok {
+			return
+		}
+		ts, err := time.Parse(time.RFC3339Nano, s)
+		if err != nil || ts.Before(start) {
+			return
+		}
+		i := int(ts.Sub(start) / interval)
+		if i >= len(res) {
+			return
+		}
+		if split == "" {
+			res[i].Counts[""]++
+			return
+		}
+		for _, v := range valuesOf(lookup(m, split)) {
+			res[i].Counts[v]++
+		}
+	})
+	return res, err
+}
+
+// TopTerms implements store.Aggregator.
+func (r *Repo[T]) TopTerms(_ context.Context, q store.ListQuery, field string, size int) ([]store.Term, error) {
+	counts := map[string]int64{}
+	if err := r.each(q, func(m map[string]any) {
+		for _, v := range valuesOf(lookup(m, field)) {
+			counts[v]++
+		}
+	}); err != nil {
+		return nil, err
+	}
+	res := make([]store.Term, 0, len(counts))
+	for v, n := range counts {
+		res = append(res, store.Term{Value: v, Count: n})
+	}
+	sort.Slice(res, func(i, j int) bool {
+		if res[i].Count != res[j].Count {
+			return res[i].Count > res[j].Count
+		}
+		return res[i].Value < res[j].Value
+	})
+	if len(res) > size {
+		res = res[:size]
+	}
+	return res, nil
+}
+
+// each calls fn with every document matching q.
+func (r *Repo[T]) each(q store.ListQuery, fn func(map[string]any)) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, e := range r.docs {
+		var m map[string]any
+		if err := json.Unmarshal(e.raw, &m); err != nil {
+			return err
+		}
+		if matches(m, q) {
+			fn(m)
+		}
+	}
+	return nil
 }
 
 // lookup resolves a dotted path ("trigger.alert_id") in decoded JSON.
@@ -359,28 +469,47 @@ func toFloat(v any) (float64, bool) {
 func NewStore(prefix string) *store.Store {
 	n := store.Names{Prefix: prefix}
 	return &store.Store{
-		Names:       n,
-		Workflows:   NewRepo[domain.Workflow](n.Index("workflows")),
-		Executions:  NewRepo[domain.Execution](n.Index("executions")),
-		StepRuns:    NewRepo[domain.StepRun](n.Index("steprun")),
-		Alerts:      NewRepo[domain.Alert](n.Index("alerts")),
-		Cases:       NewRepo[domain.Case](n.Index("cases")),
-		CaseTasks:   NewRepo[domain.CaseTask](n.Index("case-tasks")),
-		CaseAlerts:  NewRepo[domain.CaseAlert](n.Index("case-alerts")),
-		Observables: NewRepo[domain.ObservableDoc](n.Index("observables")),
-		Timeline:    NewRepo[domain.TimelineEvent](n.Index("timeline")),
-		Audit:       NewRepo[domain.AuditRecord](n.Index("audit")),
-		Secrets:     NewRepo[domain.Secret](n.Index("secrets")),
-		Principals:  NewRepo[domain.Principal](n.Index("principals")),
-		Idempotency: NewRepo[domain.Idempotency](n.Index("idempotency")),
-		Timers:      NewRepo[domain.Timer](n.Index("timers")),
-		Sources:     NewRepo[domain.Source](n.Index("sources")),
-		Mappings:    NewRepo[domain.Mapping](n.Index("mappings")),
-		Filters:     NewRepo[domain.FilterSet](n.Index("filters")),
-		Lists:       NewRepo[domain.List](n.Index("lists")),
-		Cursors:     NewRepo[domain.Cursor](n.Index("cursors")),
-		Raw:         NewRepo[domain.RawRecord](n.Index("raw")),
-		Seen:        NewRepo[domain.Seen](n.Index("seen")),
-		Connections: NewRepo[domain.Connection](n.Index("connections")),
+		Names:         n,
+		Workflows:     NewRepo[domain.Workflow](n.Index("workflows")),
+		Executions:    NewRepo[domain.Execution](n.Index("executions")),
+		StepRuns:      NewRepo[domain.StepRun](n.Index("steprun")),
+		Alerts:        NewRepo[domain.Alert](n.Index("alerts")),
+		Cases:         NewRepo[domain.Case](n.Index("cases")),
+		CaseTasks:     NewRepo[domain.CaseTask](n.Index("case-tasks")),
+		CaseAlerts:    NewRepo[domain.CaseAlert](n.Index("case-alerts")),
+		Observables:   NewRepo[domain.ObservableDoc](n.Index("observables")),
+		Timeline:      NewRepo[domain.TimelineEvent](n.Index("timeline")),
+		Audit:         NewRepo[domain.AuditRecord](n.Index("audit")),
+		Secrets:       NewRepo[domain.Secret](n.Index("secrets")),
+		Principals:    NewRepo[domain.Principal](n.Index("principals")),
+		Idempotency:   NewRepo[domain.Idempotency](n.Index("idempotency")),
+		Timers:        NewRepo[domain.Timer](n.Index("timers")),
+		Approvals:     NewRepo[domain.Approval](n.Index("approvals")),
+		Subscriptions: NewRepo[domain.Subscription](n.Index("subscriptions")),
+		Sources:       NewRepo[domain.Source](n.Index("sources")),
+		Mappings:      NewRepo[domain.Mapping](n.Index("mappings")),
+		Filters:       NewRepo[domain.FilterSet](n.Index("filters")),
+		Lists:         NewRepo[domain.List](n.Index("lists")),
+		Cursors:       NewRepo[domain.Cursor](n.Index("cursors")),
+		Raw:           NewRepo[domain.RawRecord](n.Index("raw")),
+		Seen:          NewRepo[domain.Seen](n.Index("seen")),
+		Connections:   NewRepo[domain.Connection](n.Index("connections")),
 	}
+}
+
+// Count implements store.Counter.
+func (r *Repo[T]) Count(_ context.Context, q store.ListQuery) (int64, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var n int64
+	for _, e := range r.docs {
+		var m map[string]any
+		if err := json.Unmarshal(e.raw, &m); err != nil {
+			return 0, err
+		}
+		if matches(m, q) {
+			n++
+		}
+	}
+	return n, nil
 }

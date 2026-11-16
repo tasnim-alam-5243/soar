@@ -1,0 +1,34 @@
+# Pull: poll the Wazuh indexer. Disabled until SOAR_WAZUH_INDEXER_URL is set when `soar seed` runs.
+# String values starting with "cel:" are CEL expressions; everything else is literal.
+# Variables: cursor.start, cursor.end (RFC 3339), cursor.order (asc|desc), cursor.after
+# (sort key of the previous page, null on the first page; a null value drops the key).
+name: wazuh-pull
+system: wazuh-prod
+adapter: poll_http
+parser: json
+mapping: wazuh_alert@1
+filters: [wazuh-default@1]
+schedule: every 15s
+dedup: { window: 10m }
+enabled: false
+config:
+  connection: wazuh_indexer
+  request:
+    method: POST
+    # Daily indices are named by the UTC date of @timestamp. Searching wazuh-alerts-* would touch
+    # every shard of a large cluster, so the poller lists the last index_window.days indices.
+    path: '/{index}/_search?ignore_unavailable=true&allow_no_indices=true'
+    index_window: { prefix: 'wazuh-alerts-4.x-', days: 2 }
+    body:
+      size: 500
+      # @timestamp then id (spec 10.1). If the indexer rejects sorting on id, the poller drops
+      # the second key and relies on the overlap plus the duplicate guard.
+      sort: [{ '@timestamp': 'cel:cursor.order' }, { id: 'cel:cursor.order' }]
+      search_after: 'cel:cursor.after'
+      query: { bool: { filter: [{ range: { '@timestamp': { gte: 'cel:cursor.start', lte: 'cel:cursor.end' } } }] } }
+  items_path: hits.hits
+  item_path: _source
+  key_path: sort               # each hit's sort values: keyset paging, so pages never skip or repeat
+  cursor: { field: '@timestamp', id_field: id, overlap: 60s, initial: 1h }
+  max_pages_per_cycle: 20      # new-data pages per cycle; a capped cycle is followed at once by the next
+  overlap_pages: 40            # late-arrival sweep, newest first: 20,000 alerts = the whole 60 s overlap up to ~330/s

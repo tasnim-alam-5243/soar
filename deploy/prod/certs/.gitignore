@@ -1,0 +1,5 @@
+# PEM files for the TLS settings in .env (CA bundles, client certificates, the HTTPS
+# certificate of the roles). Keep private keys out of version control.
+*.pem
+*.key
+*.crt

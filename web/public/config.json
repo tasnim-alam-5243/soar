@@ -1,0 +1,7 @@
+{
+  "apiBase": "/api/v1",
+  "oidc": {
+    "authority": "http://localhost:8180/realms/soar",
+    "clientId": "soar-web"
+  }
+}

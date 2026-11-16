@@ -1,5 +1,8 @@
-# Dev stack (Steps 1-2). Keycloak, MinIO, runner and web are added by the steps that need them.
-# Security plugin is OFF for OpenSearch in dev. Production enables TLS + a least-privilege user (Step 9/15).
+# Development stack: every role of the platform plus OpenSearch, NATS, S3 object storage (RustFS), Keycloak and the
+# sandboxed Python runner. The api role also serves the web UI (http://127.0.0.1:8080/). All ports bind to 127.0.0.1.
+# DEVELOPMENT DEFAULTS ARE PUBLIC (master key, bootstrap API key, Keycloak users): change them in
+# deploy/compose/.env before this stack holds real data. Production: deploy/prod (Step 15).
+# The OpenSearch security plugin is OFF here; production enables TLS and a least-privilege user.
 name: soar
 
 x-soar: &soar
@@ -9,7 +12,7 @@ x-soar: &soar
   read_only: true
   cap_drop: [ALL]
   security_opt: ["no-new-privileges:true"]
-  environment:
+  environment: &soar-env
     SOAR_OS_URLS: http://opensearch:9200
     SOAR_NATS_URL: nats://nats:4222
     SOAR_PARTITIONS: "${SOAR_PARTITIONS:-8}"
@@ -17,6 +20,20 @@ x-soar: &soar
     # Step 2. One dev node cannot hold replicas (cluster would stay yellow); production sets both to 1.
     SOAR_OS_STATE_REPLICAS: "${SOAR_OS_STATE_REPLICAS:-0}"
     SOAR_OS_TS_REPLICAS: "${SOAR_OS_TS_REPLICAS:-0}"
+    # Step 5. JetStream reserves max_bytes against free disk, so the dev default is modest (production: 20 GiB, spec 8.2).
+    SOAR_EVENTS_MAX_BYTES: "${SOAR_EVENTS_MAX_BYTES:-2147483648}"
+    SOAR_NATS_REPLICAS: "${SOAR_NATS_REPLICAS:-1}"
+    SOAR_PROCESSOR_WORKERS: "${SOAR_PROCESSOR_WORKERS:-2}"
+    # Step 7: S3 object storage (the "s3" service below) for payloads over 64 KB, raw bodies and case evidence.
+    SOAR_BLOB_ENDPOINT: http://s3:9000
+    SOAR_BLOB_ACCESS_KEY: "${S3_ACCESS_KEY:-soar-s3}"
+    SOAR_BLOB_SECRET_KEY: "${S3_SECRET_KEY:-soar-s3-dev-password}"
+    SOAR_POLICY_FILE: /etc/soar/policy.yaml
+    # Step 9: secret encryption master key (32 bytes, base64). Generate: openssl rand -base64 32
+    SOAR_MASTER_KEY_ID: "${SOAR_MASTER_KEY_ID:-k1}"
+    SOAR_MASTER_KEY: "${SOAR_MASTER_KEY:-ZGV2LW9ubHktbWFzdGVyLWtleS1jaGFuZ2UtbWUhISE=}"
+  volumes:
+    - ../../config/policy.yaml:/etc/soar/policy.yaml:ro,z
   depends_on:
     opensearch: { condition: service_healthy }
     nats: { condition: service_healthy }
@@ -60,9 +77,11 @@ services:
   nats:
     image: nats:2.11-alpine
     restart: unless-stopped
-    command: ["-c", "/etc/nats/nats.conf"]
+    # NATS_CONF picks the durability profile: nats.conf (fsync every write, the spec default for one node)
+    # or nats-relaxed.conf (fsync every 200 ms). See `make nats-relaxed` and the README for the measured difference.
+    command: ["-c", "/etc/nats/${NATS_CONF:-nats.conf}"]
     volumes:
-      - ../nats/nats.conf:/etc/nats/nats.conf:ro,z   # ":z" relabels for SELinux (Rocky Linux)
+      - ../nats:/etc/nats:ro,z   # ":z" relabels for SELinux (Rocky Linux)
       - nats-data:/data
     ports:
       - "127.0.0.1:4222:4222"
@@ -84,11 +103,39 @@ services:
     depends_on:
       opensearch: { condition: service_healthy }
       nats: { condition: service_healthy }
+      s3: { condition: service_healthy }
+
+  # Installs the built-in source packs (Wazuh mapping, filter set, sources, lists). Idempotent.
+  # Set SOAR_WAZUH_INDEXER_URL (+ user/password for the collector) in .env to enable the pull source.
+  seed:
+    <<: *soar
+    restart: "no"
+    command: ["seed"]
+    environment:
+      <<: *soar-env
+      SOAR_WAZUH_INDEXER_URL: "${SOAR_WAZUH_INDEXER_URL:-}"
+      SOAR_WAZUH_INDEXER_CA_FILE: "${SOAR_WAZUH_INDEXER_CA_FILE:-}"
+      SOAR_WAZUH_INDEXER_INSECURE: "${SOAR_WAZUH_INDEXER_INSECURE:-false}"
 
   api:
     <<: *soar
     command: ["api"]
-    ports: ["127.0.0.1:8080:8080"]
+    environment:
+      <<: *soar-env
+      # Keycloak: tokens carry the issuer the browser sees; keys are fetched over the compose network.
+      SOAR_OIDC_ISSUER: "${SOAR_OIDC_ISSUER:-http://localhost:8180/realms/soar}"
+      SOAR_OIDC_AUDIENCE: soar-api
+      SOAR_OIDC_JWKS_URL: "${SOAR_OIDC_JWKS_URL:-http://keycloak:8080/realms/soar/protocol/openid-connect/certs}"
+      # First admin API key (CLI, scripts, tests). CHANGE IT: this default is public.
+      SOAR_BOOTSTRAP_API_KEY: "${SOAR_BOOTSTRAP_API_KEY:-soar_dev-bootstrap-key-change-me-0123456789abcdef}"
+      SOAR_AUTH_DISABLED: "${SOAR_AUTH_DISABLED:-false}"
+      # The web UI is served by this role at http://<publish address>:8080/ (spec 12).
+      SOAR_UI_ENABLED: "${SOAR_UI_ENABLED:-true}"
+      SOAR_UI_OIDC_AUTHORITY: "${SOAR_UI_OIDC_AUTHORITY:-}"   # empty: SOAR_OIDC_ISSUER
+      SOAR_UI_OIDC_CLIENT_ID: "${SOAR_UI_OIDC_CLIENT_ID:-soar-web}"
+    # 127.0.0.1 by default; SOAR_API_PUBLISH=<LAN address> in .env opens the API and UI to the LAN
+    # over plain HTTP (lab only: sign in with an API key; Keycloak login needs localhost or HTTPS).
+    ports: ["${SOAR_API_PUBLISH:-127.0.0.1}:8080:8080"]
     healthcheck: &hc
       test: ["CMD", "/soar", "healthcheck", "http://127.0.0.1:8080/readyz"]
       interval: 10s
@@ -99,17 +146,45 @@ services:
   ingest:
     <<: *soar
     command: ["ingest"]
-    ports: ["127.0.0.1:8081:8081"]
+    environment:
+      <<: *soar-env
+      # Token the Wazuh Integrator sends (api_key). CHANGE IT: this default is public.
+      SOAR_SOURCE_TOKEN_WAZUH_PROD: "${SOAR_SOURCE_TOKEN_WAZUH_PROD:-dev-wazuh-token-change-me}"
+    depends_on:
+      opensearch: { condition: service_healthy }
+      nats: { condition: service_healthy }
+      migrate: { condition: service_completed_successfully }
+      seed: { condition: service_completed_successfully }
+    # 127.0.0.1 by default; SOAR_INGEST_PUBLISH=<LAN address> in .env lets a Wazuh manager push here
+    ports: ["${SOAR_INGEST_PUBLISH:-127.0.0.1}:8081:8081"]
     healthcheck: { <<: *hc, test: ["CMD", "/soar", "healthcheck", "http://127.0.0.1:8081/readyz"] }
 
   processor:
     <<: *soar
     command: ["processor"]
+    depends_on:
+      opensearch: { condition: service_healthy }
+      nats: { condition: service_healthy }
+      migrate: { condition: service_completed_successfully }
+      seed: { condition: service_completed_successfully }
     healthcheck: { <<: *hc, test: ["CMD", "/soar", "healthcheck", "http://127.0.0.1:8082/readyz"] }
 
   collector:
     <<: *soar
     command: ["collector"]
+    environment:
+      <<: *soar-env
+      SOAR_WAZUH_INDEXER_USER: "${SOAR_WAZUH_INDEXER_USER:-}"
+      SOAR_WAZUH_INDEXER_PASSWORD: "${SOAR_WAZUH_INDEXER_PASSWORD:-}"
+      # local directories file_object sources may read (mount them here first); none by default
+      SOAR_INGEST_DIRS: "${SOAR_INGEST_DIRS:-}"
+    # syslog sources (adapter syslog, listen ":5514") receive here; loopback only in development
+    ports: ["127.0.0.1:5514:5514/udp", "127.0.0.1:5514:5514/tcp"]
+    depends_on:
+      opensearch: { condition: service_healthy }
+      nats: { condition: service_healthy }
+      migrate: { condition: service_completed_successfully }
+      seed: { condition: service_completed_successfully }
     healthcheck: { <<: *hc, test: ["CMD", "/soar", "healthcheck", "http://127.0.0.1:8083/readyz"] }
 
   orchestrator:
@@ -120,6 +195,14 @@ services:
   worker:
     <<: *soar
     command: ["worker"]
+    environment:
+      <<: *soar-env
+      SOAR_RUNNER_ADDR: runner:50051
+      # The runner network is internal (no other containers, no outside access), so the dev stack talks
+      # plain gRPC to it; production uses TLS (deploy/prod). Decrypted connection secrets cross this channel.
+      SOAR_RUNNER_INSECURE: "${SOAR_RUNNER_INSECURE:-true}"
+      SOAR_WORKER_CONCURRENCY: "${SOAR_WORKER_CONCURRENCY:-16}"
+    networks: [default, runner]
     healthcheck: { <<: *hc, test: ["CMD", "/soar", "healthcheck", "http://127.0.0.1:8085/readyz"] }
 
   scheduler:
@@ -127,6 +210,87 @@ services:
     command: ["scheduler"]
     healthcheck: { <<: *hc, test: ["CMD", "/soar", "healthcheck", "http://127.0.0.1:8086/readyz"] }
 
+  # Object storage (spec 5.1). Any S3-compatible store works (path-style requests, SigV4).
+  # The dev stack runs RustFS (Apache-2.0), a MinIO-compatible server: MinIO no longer publishes
+  # container images (minio/minio and minio/mc are gone from Docker Hub and Quay).
+  # Console: http://localhost:9001 with the S3 keys below. Server logs are files under /logs in the container.
+  s3:
+    image: rustfs/rustfs:1.0.5
+    restart: unless-stopped
+    cap_drop: [ALL]               # the image runs as uid 10001 on unprivileged ports
+    security_opt: ["no-new-privileges:true"]
+    environment:
+      RUSTFS_ACCESS_KEY: "${S3_ACCESS_KEY:-soar-s3}"
+      RUSTFS_SECRET_KEY: "${S3_SECRET_KEY:-soar-s3-dev-password}"
+      RUSTFS_ADDRESS: ":9000"
+      RUSTFS_CONSOLE_ENABLE: "true"
+      RUSTFS_CONSOLE_ADDRESS: ":9001"
+    volumes: [s3-data:/data]
+    ports: ["127.0.0.1:9000:9000", "127.0.0.1:9001:9001"]
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://127.0.0.1:9000/health/ready"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 10s
+
+  # OIDC provider (spec 13). The dev realm (deploy/keycloak/realm.json) has users admin, engineer,
+  # analyst and viewer whose password equals the user name. DEVELOPMENT ONLY.
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.2
+    restart: unless-stopped
+    command: ["start-dev", "--import-realm", "--http-port=8080"]
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: "${KEYCLOAK_ADMIN:-kcadmin}"
+      KC_BOOTSTRAP_ADMIN_PASSWORD: "${KEYCLOAK_ADMIN_PASSWORD:-kcadmin-dev-password}"
+      KC_HOSTNAME: "${KC_HOSTNAME:-http://localhost:8180}"
+      KC_HOSTNAME_BACKCHANNEL_DYNAMIC: "true"
+      KC_HEALTH_ENABLED: "true"
+    volumes:
+      - ../keycloak/realm.json:/opt/keycloak/data/import/realm.json:ro,z
+    ports: ["127.0.0.1:8180:8080"]
+
+  # Sandboxed Python runner (spec 10): non-root, read-only filesystem, no capabilities, CPU and
+  # memory limits. It reaches the worker over an internal network. Integrations need egress to
+  # their products (IRIS, Microsoft Graph); in production route it through an allowlisting proxy
+  # (HTTPS_PROXY) or a Kubernetes NetworkPolicy instead of the open "egress" network used here.
+  runner:
+    image: soar-runner:dev
+    pull_policy: never
+    restart: unless-stopped
+    read_only: true
+    tmpfs: ["/tmp:size=64m,mode=1777"]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    environment:
+      SOAR_RUNNER_WORKERS: "16"
+      HTTPS_PROXY: "${RUNNER_HTTPS_PROXY:-}"
+    networks: [runner, egress]
+    deploy:
+      resources:
+        limits: { cpus: "2", memory: 1g }
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 50051), 2)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Optional monitoring: docker compose --profile monitoring up -d  (Prometheus on 127.0.0.1:9090)
+  prometheus:
+    image: prom/prometheus:v3.2.1
+    profiles: [monitoring]
+    restart: unless-stopped
+    command: ["--config.file=/etc/prometheus/prometheus.yml", "--storage.tsdb.retention.time=7d"]
+    volumes:
+      - ../prometheus:/etc/prometheus:ro,z
+    ports: ["127.0.0.1:9090:9090"]
+
+networks:
+  default: {}
+  runner: { internal: true }
+  egress: {}
+
 volumes:
   opensearch-data:
   nats-data:
+  s3-data:

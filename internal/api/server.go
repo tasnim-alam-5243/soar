@@ -1,8 +1,8 @@
 // Package api serves the REST API (/api/v1). The contract is api/openapi.yaml;
 // contract tests fail if a route and the document ever disagree.
 //
-// Authentication and authorisation arrive in Step 9. Until then the API is open:
-// the dev Compose file publishes it on 127.0.0.1 only, so do not expose it.
+// Every route is authenticated (OIDC access token or API key) and authorised by
+// role (spec section 13); every successful mutation is audited.
 package api
 
 import (
@@ -12,6 +12,10 @@ import (
 	"time"
 
 	apispec "github.com/yourorg/soar/api"
+	"github.com/yourorg/soar/internal/actions"
+	"github.com/yourorg/soar/internal/blob"
+	"github.com/yourorg/soar/internal/cases"
+	"github.com/yourorg/soar/internal/security"
 	"github.com/yourorg/soar/internal/store"
 )
 
@@ -29,18 +33,25 @@ type Route struct {
 
 // Server holds the dependencies of every handler.
 type Server struct {
-	st  *store.Store
-	log *slog.Logger
-	now func() time.Time
+	st         *store.Store
+	log        *slog.Logger
+	now        func() time.Time
+	q          QueueOps
+	pub        Publisher
+	reg        *actions.Registry
+	secrets    *security.SecretStore
+	auth       *security.Authenticator
+	cases      *cases.Service
+	blob       blob.Blob
+	events     *Broker
+	partitions int
+	testWait   time.Duration // how long POST /connections/{id}/test waits (tests shorten it)
 }
 
 // New builds a Server.
 func New(st *store.Store, log *slog.Logger) *Server {
-	return &Server{st: st, log: log, now: func() time.Time { return time.Now().UTC() }}
+	return &Server{st: st, log: log, now: func() time.Time { return time.Now().UTC() }, cases: cases.New(st, log), partitions: 8, events: NewBroker()}
 }
-
-// actor identifies the caller for audit trails and created_by. Real identities come in Step 9.
-func (s *Server) actor(*http.Request) string { return "anonymous" }
 
 // Routes lists every operation. The contract test compares it with the OpenAPI document.
 func (s *Server) Routes() []Route {
@@ -55,15 +66,26 @@ func (s *Server) Routes() []Route {
 		{"POST", "/workflows/{id}/versions", s.newWorkflowVersion},
 		{"POST", "/workflows/{id}/publish", s.publishWorkflow},
 		{"POST", "/workflows/{id}/run", s.runWorkflow},
+		{"GET", "/me", s.me},
+		{"GET", "/stream", s.stream},
+		{"GET", "/dashboard", s.dashboard},
 
 		{"GET", "/executions", s.listExecutions},
 		{"GET", "/executions/{id}", s.getExecution},
 		{"GET", "/executions/{id}/steps", s.listSteps},
 		{"POST", "/executions/{id}/cancel", s.cancelExecution},
+		{"POST", "/executions/{id}/retry", s.retryExecution},
+
+		{"GET", "/approvals", s.listApprovals},
+		{"GET", "/approvals/{id}", s.getApproval},
+		{"POST", "/approvals/{id}/decision", s.decideApproval},
 
 		{"GET", "/alerts", s.listAlerts},
 		{"POST", "/alerts", s.createAlert},
 		{"GET", "/alerts/{id}", s.getAlert},
+		{"PATCH", "/alerts/{id}", s.patchAlert},
+		{"POST", "/alerts/{id}/case", s.alertToCase},
+		{"GET", "/assignees", s.assignees},
 
 		{"POST", "/cases", s.createCase},
 		{"GET", "/cases", s.listCases},
@@ -71,16 +93,58 @@ func (s *Server) Routes() []Route {
 		{"PATCH", "/cases/{id}", s.patchCase},
 		{"POST", "/cases/{id}/tasks", s.createTask},
 		{"GET", "/cases/{id}/tasks", s.listTasks},
+		{"PATCH", "/cases/{id}/tasks/{task_id}", s.patchTask},
+		{"POST", "/cases/{id}/alerts", s.linkAlerts},
+		{"GET", "/cases/{id}/alerts", s.caseAlerts},
+		{"POST", "/cases/{id}/evidence", s.uploadEvidence},
+		{"GET", "/cases/{id}/evidence/{eid}", s.evidenceURL},
 		{"POST", "/cases/{id}/observables", s.addCaseObservable},
 		{"GET", "/cases/{id}/timeline", s.caseTimeline},
 
 		{"GET", "/observables", s.listObservables},
 		{"GET", "/observables/{id}", s.getObservable},
 
+		{"POST", "/sources", s.createSource},
+		{"GET", "/sources", s.listSources},
+		{"GET", "/sources/{id}", s.getSource},
+		{"PATCH", "/sources/{id}", s.patchSource},
+		{"POST", "/sources/{id}/test", s.testSource},
+		{"GET", "/sources/{id}/health", s.sourceHealth},
+		{"POST", "/mappings", s.createMapping},
+		{"GET", "/mappings", s.listMappings},
+		{"POST", "/mappings/test", s.testMapping},
+		{"GET", "/mappings/{id}", s.getMapping},
+		{"POST", "/filters", s.createFilter},
+		{"GET", "/filters", s.listFilters},
+		{"POST", "/filters/test", s.testFilter},
+		{"GET", "/filters/{id}", s.getFilter},
+		{"GET", "/lists", s.listLists},
+		{"GET", "/lists/{name}", s.getList},
+		{"PUT", "/lists/{name}", s.putList},
+		{"GET", "/dlq", s.listDLQ},
+		{"POST", "/dlq/{id}/replay", s.replayDLQ},
+		{"GET", "/queues/stats", s.queueStats},
+
 		{"POST", "/connections", s.createConnection},
 		{"GET", "/connections", s.listConnections},
 		{"GET", "/connections/{id}", s.getConnection},
 		{"DELETE", "/connections/{id}", s.deleteConnection},
+		{"POST", "/connections/{id}/test", s.testConnection},
+
+		{"GET", "/connectors", s.listConnectors},
+		{"GET", "/connectors/{id}/actions", s.connectorActions},
+
+		{"PUT", "/secrets/{name}", s.putSecret},
+		{"GET", "/secrets", s.listSecrets},
+		{"DELETE", "/secrets/{name}", s.deleteSecret},
+
+		{"POST", "/principals", s.createPrincipal},
+		{"GET", "/principals", s.listPrincipals},
+		{"GET", "/principals/{id}", s.getPrincipal},
+		{"PATCH", "/principals/{id}", s.patchPrincipal},
+		{"DELETE", "/principals/{id}", s.deletePrincipal},
+		{"GET", "/roles", s.listRoles},
+		{"GET", "/audit", s.listAudit},
 	}
 }
 
@@ -89,7 +153,7 @@ func (s *Server) Routes() []Route {
 func (s *Server) Mount(mux *http.ServeMux) {
 	routes := s.Routes()
 	for _, rt := range routes {
-		mux.HandleFunc(rt.Method+" "+Prefix+rt.Path, s.wrap(rt.H))
+		mux.HandleFunc(rt.Method+" "+Prefix+rt.Path, s.guard(rt, s.wrap(rt.H)))
 	}
 	mux.HandleFunc(Prefix+"/", s.wrap(func(_ http.ResponseWriter, r *http.Request) error {
 		var allowed []string
@@ -133,7 +197,9 @@ func (s *Server) wrap(h handler) http.HandlerFunc {
 				writeProblem(r.Context(), w, newProblem(http.StatusInternalServerError, "internal", "Internal error", "an unexpected error occurred; quote the request_id when reporting it"))
 			}
 		}()
-		r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
+		if !strings.HasSuffix(r.URL.Path, "/evidence") { // evidence uploads have their own, larger cap
+			r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
+		}
 		err := h(w, r)
 		if err == nil {
 			return
@@ -150,12 +216,4 @@ func (s *Server) openapi(w http.ResponseWriter, _ *http.Request) error {
 	w.Header().Set("Content-Type", "application/yaml")
 	_, err := w.Write(apispec.Spec)
 	return err
-}
-
-func (s *Server) runWorkflow(http.ResponseWriter, *http.Request) error {
-	return notImplemented("running workflows needs the execution engine (Steps 6-7)")
-}
-
-func (s *Server) cancelExecution(http.ResponseWriter, *http.Request) error {
-	return notImplemented("cancelling executions needs the execution engine (Steps 6-8)")
 }

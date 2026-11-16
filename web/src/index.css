@@ -1,0 +1,180 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+ * Design tokens. Dark is the default theme (SOC rooms are dim); light is a full token set of
+ * its own, not an inversion. Values are "r g b" channels for Tailwind's <alpha-value>.
+ *
+ * Severity is ordinal, so it is one hue (red-orange) stepped by lightness: critical is the
+ * strongest step in each theme. Status colors (good/warn/serious/crit) are reserved for state
+ * and always ship with an icon or a label. Both sets were checked with the data-viz validator
+ * (monotone lightness, visible steps, contrast against the panel surface).
+ */
+:root {
+  color-scheme: light;
+  --bg: 246 247 249;
+  --panel: 255 255 255;
+  --raised: 255 255 255;
+  --hover: 241 243 246;
+  --line: 230 232 236;
+  --line-strong: 212 216 222;
+  --fg: 13 17 23;
+  --fg-2: 64 72 84;
+  --fg-3: 110 118 129;
+  --fg-4: 160 167 176;
+  --accent: 79 86 214;
+  --accent-fg: 255 255 255;
+  --accent-soft: 236 237 252;
+  --good: 12 133 12;
+  --warn: 178 120 0;
+  --serious: 214 98 52;
+  --crit: 208 59 59;
+  --sev-1: 220 156 141;
+  --sev-2: 209 124 106;
+  --sev-3: 197 92 70;
+  --sev-4: 180 60 36;
+  --sev-5: 154 34 7;
+  --grid: 236 238 241;
+  --axis: 196 201 208;
+  --row-h: 40px;
+}
+
+.dark {
+  color-scheme: dark;
+  --bg: 10 11 13;
+  --panel: 17 19 22;
+  --raised: 23 26 30;
+  --hover: 27 31 36;
+  --line: 32 36 42;
+  --line-strong: 45 51 59;
+  --fg: 236 238 241;
+  --fg-2: 176 183 192;
+  --fg-3: 122 130 141;
+  --fg-4: 82 89 99;
+  --accent: 124 134 255;
+  --accent-fg: 10 11 13;
+  --accent-soft: 30 33 64;
+  --good: 12 163 12;
+  --warn: 250 178 25;
+  --serious: 236 131 90;
+  --crit: 232 84 84;
+  --sev-1: 121 78 69;
+  --sev-2: 159 93 79;
+  --sev-3: 199 108 88;
+  --sev-4: 235 126 103;
+  --sev-5: 255 148 122;
+  --grid: 28 32 37;
+  --axis: 52 58 66;
+}
+
+:root[data-density="compact"] {
+  --row-h: 32px;
+}
+
+@layer base {
+  * {
+    @apply border-line;
+  }
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+  body {
+    @apply bg-bg font-sans text-base text-fg antialiased;
+    font-feature-settings: "cv11", "ss01", "ss03";
+  }
+  ::selection {
+    background: rgb(var(--accent) / 0.3);
+  }
+  :focus-visible {
+    outline: 2px solid rgb(var(--accent));
+    outline-offset: 1px;
+  }
+  /* thin, quiet scrollbars */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: rgb(var(--line-strong)) transparent;
+  }
+  code,
+  kbd,
+  pre {
+    @apply font-mono;
+  }
+}
+
+@layer components {
+  .tabular {
+    font-variant-numeric: tabular-nums;
+  }
+  .hairline {
+    @apply border-line;
+  }
+  .label {
+    @apply text-2xs font-medium uppercase tracking-[0.06em] text-fg-3;
+  }
+  .skeleton {
+    @apply relative overflow-hidden rounded bg-hover;
+  }
+  .skeleton::after {
+    content: "";
+    @apply absolute inset-0;
+    transform: translateX(-100%);
+    background: linear-gradient(90deg, transparent, rgb(var(--fg) / 0.04), transparent);
+    animation: shimmer 1.4s infinite;
+  }
+}
+
+@keyframes shimmer {
+  100% {
+    transform: translateX(100%);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 1ms !important;
+    transition-duration: 1ms !important;
+  }
+}
+
+/* React Flow, themed with the tokens */
+.react-flow {
+  --xy-background-color: transparent;
+  --xy-node-border-radius: 8px;
+  --xy-edge-stroke: rgb(var(--fg-4));
+  --xy-edge-stroke-selected: rgb(var(--accent));
+  --xy-connectionline-stroke: rgb(var(--accent));
+  --xy-minimap-background-color: rgb(var(--panel));
+  --xy-minimap-mask-background-color: rgb(var(--bg) / 0.6);
+  --xy-controls-button-background-color: rgb(var(--raised));
+  --xy-controls-button-background-color-hover: rgb(var(--hover));
+  --xy-controls-button-color: rgb(var(--fg-2));
+  --xy-controls-button-border-color: rgb(var(--line));
+  --xy-handle-background-color: rgb(var(--fg-3));
+  --xy-handle-border-color: rgb(var(--panel));
+  --xy-background-pattern-color: rgb(var(--line-strong));
+}
+.react-flow__attribution {
+  display: none;
+}
+.react-flow__controls {
+  @apply overflow-hidden rounded-md border border-line shadow-none;
+}
+/* doubled class: React Flow's own stylesheet loads later with the same specificity */
+.react-flow .react-flow__edge-textbg {
+  fill: rgb(var(--raised));
+}
+.react-flow .react-flow__edge-text {
+  fill: rgb(var(--fg-3));
+  font-size: 10px;
+}
+
+/* recharts: never draw a focus box around the whole chart */
+.recharts-wrapper:focus,
+.recharts-surface:focus {
+  outline: none;
+}

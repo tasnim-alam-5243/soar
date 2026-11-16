@@ -27,8 +27,10 @@ type fakeOS struct {
 }
 
 func newFake() *fakeOS {
-	return &fakeOS{indices: map[string]map[string]any{}, aliases: map[string]string{}, templates: map[string]map[string]any{},
-		policies: map[string]int{}, docs: map[string]json.RawMessage{}}
+	return &fakeOS{
+		indices: map[string]map[string]any{}, aliases: map[string]string{}, templates: map[string]map[string]any{},
+		policies: map[string]int{}, docs: map[string]json.RawMessage{},
+	}
 }
 
 func (f *fakeOS) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -130,8 +132,10 @@ func newRunner(t *testing.T, f *fakeOS) *Runner {
 	t.Cleanup(srv.Close)
 	cl := opensearch.New([]string{srv.URL}, "", "")
 	ret, _ := schema.ParseRetention([]byte("default: 7d\nclasses:\n  cases: 3d\n  seen: ttl\n  idempotency: ttl\n"))
-	return &Runner{C: cl, Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
-		Opts: schema.Options{Prefix: "soar", Retention: ret}}
+	return &Runner{
+		C: cl, Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Opts: schema.Options{Prefix: "soar", Retention: ret},
+	}
 }
 
 func TestApplyIsRepeatable(t *testing.T) {
@@ -148,8 +152,8 @@ func TestApplyIsRepeatable(t *testing.T) {
 			t.Errorf("first run %s: want created, got %s %s", res.Alias, res.Action, res.Detail)
 		}
 	}
-	if len(first) != 22 {
-		t.Fatalf("want 22 results, got %d", len(first))
+	if len(first) != 24 {
+		t.Fatalf("want 24 results, got %d", len(first))
 	}
 	writes := len(f.calls)
 

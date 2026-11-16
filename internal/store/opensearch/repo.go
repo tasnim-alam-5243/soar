@@ -281,28 +281,10 @@ func (r *Repo[T]) List(ctx context.Context, q store.ListQuery) (store.Page[T], e
 		order = "desc"
 	}
 
-	var filter []any
-	for field, vals := range q.Terms {
-		filter = append(filter, map[string]any{"terms": map[string]any{field: vals}})
-	}
-	for _, rg := range q.Ranges {
-		b := map[string]any{}
-		if rg.Gte != nil {
-			b["gte"] = rg.Gte
-		}
-		if rg.Lte != nil {
-			b["lte"] = rg.Lte
-		}
-		filter = append(filter, map[string]any{"range": map[string]any{rg.Field: b}})
-	}
-	query := map[string]any{"match_all": map[string]any{}}
-	if len(filter) > 0 {
-		query = map[string]any{"bool": map[string]any{"filter": filter}}
-	}
 	body := map[string]any{
 		"size":             limit + 1, // one extra row tells us whether another page exists
 		"track_total_hits": false,
-		"query":            query,
+		"query":            queryFor(q),
 		"sort": []any{
 			map[string]any{sortField: map[string]any{"order": order, "missing": "_last"}},
 			map[string]any{"id": map[string]any{"order": order}},
@@ -356,4 +338,144 @@ func decodeWrite(out []byte) (store.Version, error) {
 		return store.Version{}, fmt.Errorf("opensearch: decode write response: %w", err)
 	}
 	return w.version(), nil
+}
+
+// queryFor turns the filters of q into an OpenSearch query (sort and paging are not part of it).
+func queryFor(q store.ListQuery) map[string]any {
+	var filter []any
+	for field, vals := range q.Terms {
+		t := map[string]any{"terms": map[string]any{field: vals}}
+		if q.MissingOK(field) {
+			t = map[string]any{"bool": map[string]any{"minimum_should_match": 1, "should": []any{
+				t, map[string]any{"bool": map[string]any{"must_not": map[string]any{"exists": map[string]any{"field": field}}}},
+			}}}
+		}
+		filter = append(filter, t)
+	}
+	for _, rg := range q.Ranges {
+		b := map[string]any{}
+		if rg.Gte != nil {
+			b["gte"] = rg.Gte
+		}
+		if rg.Lte != nil {
+			b["lte"] = rg.Lte
+		}
+		filter = append(filter, map[string]any{"range": map[string]any{rg.Field: b}})
+	}
+	if q.Search != "" && len(q.SearchFields) > 0 {
+		filter = append(filter, map[string]any{"simple_query_string": map[string]any{
+			"query": q.Search, "fields": q.SearchFields, "default_operator": "and", "lenient": true,
+		}})
+	}
+	if len(filter) == 0 {
+		return map[string]any{"match_all": map[string]any{}}
+	}
+	return map[string]any{"bool": map[string]any{"filter": filter}}
+}
+
+// Histogram implements store.Aggregator with a fixed_interval date histogram.
+func (r *Repo[T]) Histogram(ctx context.Context, q store.ListQuery, field string, from, to time.Time, interval time.Duration, split string) ([]store.TimeBucket, error) {
+	h := map[string]any{"date_histogram": map[string]any{
+		"field": field, "fixed_interval": strconv.FormatInt(interval.Milliseconds(), 10) + "ms", "min_doc_count": 0,
+		"extended_bounds": map[string]any{"min": from.UnixMilli(), "max": to.UnixMilli()},
+	}}
+	if split != "" {
+		h["aggs"] = map[string]any{"s": map[string]any{"terms": map[string]any{"field": split, "size": 50}}}
+	}
+	body := map[string]any{"size": 0, "track_total_hits": false, "query": queryFor(q), "aggs": map[string]any{"h": h}}
+	_, out, err := r.c.Do(ctx, http.MethodPost, "/"+r.alias+"/_search", body)
+	if err != nil {
+		return nil, err
+	}
+	var sr struct {
+		Aggregations struct {
+			H struct {
+				Buckets []struct {
+					Key   int64 `json:"key"`
+					Count int64 `json:"doc_count"`
+					S     struct {
+						Buckets []termBucket `json:"buckets"`
+					} `json:"s"`
+				} `json:"buckets"`
+			} `json:"h"`
+		} `json:"aggregations"`
+	}
+	if err := json.Unmarshal(out, &sr); err != nil {
+		return nil, fmt.Errorf("opensearch: decode histogram: %w", err)
+	}
+	res := make([]store.TimeBucket, 0, len(sr.Aggregations.H.Buckets))
+	for _, b := range sr.Aggregations.H.Buckets {
+		tb := store.TimeBucket{Start: time.UnixMilli(b.Key).UTC(), Counts: map[string]int64{}}
+		if split == "" {
+			tb.Counts[""] = b.Count
+		}
+		for _, s := range b.S.Buckets {
+			tb.Counts[s.value()] = s.Count
+		}
+		res = append(res, tb)
+	}
+	return res, nil
+}
+
+// TopTerms implements store.Aggregator with a terms aggregation.
+func (r *Repo[T]) TopTerms(ctx context.Context, q store.ListQuery, field string, size int) ([]store.Term, error) {
+	body := map[string]any{"size": 0, "track_total_hits": false, "query": queryFor(q), "aggs": map[string]any{
+		"t": map[string]any{"terms": map[string]any{"field": field, "size": size}},
+	}}
+	_, out, err := r.c.Do(ctx, http.MethodPost, "/"+r.alias+"/_search", body)
+	if err != nil {
+		return nil, err
+	}
+	var sr struct {
+		Aggregations struct {
+			T struct {
+				Buckets []termBucket `json:"buckets"`
+			} `json:"t"`
+		} `json:"aggregations"`
+	}
+	if err := json.Unmarshal(out, &sr); err != nil {
+		return nil, fmt.Errorf("opensearch: decode terms: %w", err)
+	}
+	res := make([]store.Term, 0, len(sr.Aggregations.T.Buckets))
+	for _, b := range sr.Aggregations.T.Buckets {
+		res = append(res, store.Term{Value: b.value(), Count: b.Count})
+	}
+	return res, nil
+}
+
+// termBucket is one bucket of a terms aggregation; keys of numeric fields are numbers.
+type termBucket struct {
+	Key   json.RawMessage `json:"key"`
+	Str   string          `json:"key_as_string"`
+	Count int64           `json:"doc_count"`
+}
+
+func (b termBucket) value() string {
+	if b.Str != "" {
+		return b.Str
+	}
+	var s string
+	if json.Unmarshal(b.Key, &s) == nil {
+		return s
+	}
+	var f float64
+	if json.Unmarshal(b.Key, &f) == nil {
+		return strconv.FormatFloat(f, 'f', -1, 64)
+	}
+	return string(b.Key)
+}
+
+// Count implements store.Counter with the _count API (filters only; sort and paging are ignored).
+func (r *Repo[T]) Count(ctx context.Context, q store.ListQuery) (int64, error) {
+	_, out, err := r.c.Do(ctx, http.MethodPost, "/"+r.alias+"/_count", map[string]any{"query": queryFor(q)})
+	if err != nil {
+		return 0, err
+	}
+	var cr struct {
+		Count int64 `json:"count"`
+	}
+	if err := json.Unmarshal(out, &cr); err != nil {
+		return 0, fmt.Errorf("opensearch: decode count: %w", err)
+	}
+	return cr.Count, nil
 }

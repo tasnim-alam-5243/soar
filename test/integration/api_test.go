@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -40,6 +41,9 @@ func call(t *testing.T, method, path string, body any, headers ...string) apiRes
 	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
+	}
+	if key := apiKey(); key != "" {
+		req.Header.Set("Authorization", "Bearer "+key)
 	}
 	for i := 0; i+1 < len(headers); i += 2 {
 		req.Header.Set(headers[i], headers[i+1])
@@ -76,8 +80,32 @@ func eventually(t *testing.T, what string, fn func() bool) {
 
 func uniq(prefix string) string { return fmt.Sprintf("%s-%d", prefix, time.Now().UnixNano()) }
 
+// apiKey is the admin API key the tests sign in with (Step 9 made every API call
+// authenticated): SOAR_API_KEY, the stack's SOAR_BOOTSTRAP_API_KEY, or the Compose
+// development default.
+func apiKey() string {
+	for _, k := range []string{"SOAR_API_KEY", "SOAR_BOOTSTRAP_API_KEY"} {
+		if v := os.Getenv(k); v != "" {
+			return v
+		}
+	}
+	return "soar_dev-bootstrap-key-change-me-0123456789abcdef"
+}
+
+// itHTTPURL is what the test workflow's http.request calls: a URL the worker can reach.
+// In the Compose stack that is the API container; override with SOAR_IT_HTTP_URL.
+func itHTTPURL() string {
+	if u := os.Getenv("SOAR_IT_HTTP_URL"); u != "" {
+		return u
+	}
+	return "http://api:8080/healthz"
+}
+
 var itDef = map[string]any{
-	"nodes": []any{map[string]any{"id": "a", "action": "http.request"}, map[string]any{"id": "b", "action": "case.close"}},
+	"nodes": []any{
+		map[string]any{"id": "a", "action": "http.request", "params": map[string]any{"method": "GET", "url": fmt.Sprintf("%q", itHTTPURL())}},
+		map[string]any{"id": "b", "action": "case.close"},
+	},
 	"edges": []any{"a -> b"},
 }
 
@@ -168,8 +196,10 @@ func TestAPIAlertsOnRealStack(t *testing.T) {
 	src := uniq("it-src")
 	var ids []string
 	for i := 1; i <= 5; i++ {
-		a := want(t, call(t, "POST", "/alerts", map[string]any{"title": fmt.Sprint("it alert ", i), "severity": i, "source_id": src,
-			"observables": []any{map[string]any{"type": "ip", "value": "198.51.100.1"}}, "ext": map[string]any{"rule": map[string]any{"id": "5715"}}}), 201)
+		a := want(t, call(t, "POST", "/alerts", map[string]any{
+			"title": fmt.Sprint("it alert ", i), "severity": i, "source_id": src,
+			"observables": []any{map[string]any{"type": "ip", "value": "198.51.100.1"}}, "ext": map[string]any{"rule": map[string]any{"id": "5715"}},
+		}), 201)
 		ids = append(ids, a.Body["id"].(string))
 	}
 	eventually(t, "alerts searchable (time-series refresh is 5 s)", func() bool {
@@ -219,7 +249,7 @@ func TestAPIErrorModelOnRealStack(t *testing.T) {
 	}
 	want(t, call(t, "GET", "/nope", nil), 404)
 	want(t, call(t, "GET", "/alerts?cursor=garbage", nil), 400)
-	want(t, call(t, "POST", "/workflows/wf_x/run", nil), 501)
+	want(t, call(t, "POST", "/workflows/wf_x/run", nil), 404)
 	spec, err := http.Get(apiURL() + "/api/v1/openapi.yaml")
 	if err != nil {
 		t.Fatal(err)

@@ -1,0 +1,13 @@
+# Push: Wazuh's Integrator posts each alert to POST /ingest/wazuh-prod (see ../push/).
+# Both sources share system: wazuh-prod and the Wazuh alert id is the external_id, so an
+# alert that arrives by push and by pull is stored once.
+name: wazuh-prod
+system: wazuh-prod
+adapter: webhook
+parser: json
+mapping: wazuh_alert@1
+filters: [wazuh-default@1]
+auth: { type: token, token_ref: 'env:SOAR_SOURCE_TOKEN_WAZUH_PROD' }
+dedup: { window: 10m }
+rate_limit: { rps: 2500, burst: 5000 }   # above the 2,000/s burst target (spec 3.3); lower it to protect the queue from a noisy sender
+enabled: true

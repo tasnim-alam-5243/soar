@@ -16,6 +16,16 @@ func (r *statusRecorder) WriteHeader(code int) {
 	r.ResponseWriter.WriteHeader(code)
 }
 
+// Flush passes flushes through (server-sent events).
+func (r *statusRecorder) Flush() {
+	if f, ok := r.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// Unwrap lets http.ResponseController reach the connection (per-request write deadlines).
+func (r *statusRecorder) Unwrap() http.ResponseWriter { return r.ResponseWriter }
+
 // Middleware assigns a request ID (accepting a well-formed inbound X-Request-ID),
 // recovers panics and writes one access-log line per request.
 // Health probes are logged at debug level to keep logs quiet.

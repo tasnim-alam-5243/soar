@@ -1,0 +1,148 @@
+# DFIR-IRIS 2.4.27 case management (spec 10.1). One service-account API key (Bearer) with the
+# alert and case permissions it needs; assignments take IRIS user names, resolved to ids.
+# Endpoint paths are kept per API generation in actions/endpoints.yaml (api_version
+# legacy_2_4 now, v2 later). *verify* every endpoint against your 2.4.27 instance.
+name: dfir_iris
+title: DFIR-IRIS
+description: Create and update IRIS cases and alerts, add IOCs, assets, notes, timeline events and tasks, merge alerts into cases.
+version: "2.4.27"
+auth:
+  type: bearer
+connection_schema:
+  type: object
+  required: [base_url]
+  properties:
+    base_url: { type: string, format: uri }
+    api_version: { type: string, enum: [legacy_2_4], default: legacy_2_4 }
+    customer_id: { type: integer, description: IRIS customer for new cases and alerts (default 1) }
+    ca_pem: { type: string, description: PEM of a private CA that signed the IRIS certificate }
+    verify_tls: { type: boolean, default: true, description: "false skips certificate checks (lab only: a self-signed IRIS certificate); every call logs a warning and host-pinned secrets are refused" }
+secrets: [api_key]
+defaults:
+  class: python
+  retryable_errors: [network, timeout, http_5xx, http_429]
+  limits: { cpu: 0.5, memory_mb: 128, timeout_s: 60 }
+actions:
+  - { id: iris.connection.test, title: Test connection, description: Call the IRIS ping endpoint with the service API key., side_effect: read, risk: low, supports_dry_run: true, entrypoint: "actions/iris.py:connection_test", params_schema: { type: object, additionalProperties: false, properties: {} } }
+  - id: iris.case.create
+    title: Create IRIS case
+    description: Create a case in DFIR-IRIS; returns its id and URL. Pass soar_case_id to tie it to the local case.
+    side_effect: write
+    risk: low
+    supports_dry_run: true
+    entrypoint: "actions/iris.py:case_create"
+    params_schema:
+      type: object
+      additionalProperties: false
+      required: [name]
+      properties:
+        name: { type: string, maxLength: 300 }
+        description: { type: string }
+        soar_case_id: { type: string }
+        classification_id: { type: integer }
+        assignees: { type: array, items: { type: string }, description: IRIS user names }
+    output_schema: { type: object, properties: { case_id: { type: integer }, url: { type: string }, dry_run: { type: boolean } } }
+  - id: iris.case.update
+    title: Update IRIS case
+    description: Change an IRIS case's name, description, owner or tags.
+    side_effect: write
+    risk: low
+    supports_dry_run: true
+    entrypoint: "actions/iris.py:case_update"
+    params_schema:
+      type: object
+      additionalProperties: false
+      required: [case_id]
+      properties: { case_id: { type: integer }, name: { type: string }, description: { type: string }, tags: { type: array, items: { type: string } }, owner: { type: string } }
+  - id: iris.case.close
+    title: Close IRIS case
+    description: Close an IRIS case (it keeps its own retention; closing the local case does not delete it).
+    side_effect: write
+    risk: low
+    supports_dry_run: true
+    entrypoint: "actions/iris.py:case_close"
+    params_schema: { type: object, additionalProperties: false, required: [case_id], properties: { case_id: { type: integer } } }
+  - id: iris.alert.create
+    title: Create IRIS alert
+    description: Create an alert in IRIS (needs alert_write); IOCs and assets can be attached. An IOC or asset whose type IRIS does not know is skipped and reported, not fatal.
+    side_effect: write
+    risk: low
+    supports_dry_run: true
+    entrypoint: "actions/iris.py:alert_create"
+    params_schema:
+      type: object
+      additionalProperties: false
+      required: [title]
+      properties:
+        title: { type: string }
+        description: { type: string }
+        severity: { type: integer, minimum: 1, maximum: 5, description: SOAR severity, mapped to IRIS severity ids }
+        source: { type: string }
+        source_ref: { type: string }
+        source_content: { type: object }
+        event_time: { type: string, description: "when the event happened (RFC 3339); default now" }
+        note: { type: string }
+        iocs: { type: array, items: { type: object }, description: "{type (SOAR type or IRIS type name), value, tlp, description}" }
+        assets: { type: array, items: { type: object }, description: "{name, type (IRIS asset type name, default Windows - Computer), ip, description}" }
+        tags: { type: array, items: { type: string } }
+  - id: iris.alert.update
+    title: Update IRIS alert
+    description: Change an IRIS alert's status, severity or owner.
+    side_effect: write
+    risk: low
+    supports_dry_run: true
+    entrypoint: "actions/iris.py:alert_update"
+    params_schema: { type: object, additionalProperties: false, required: [alert_id], properties: { alert_id: { type: integer }, status_id: { type: integer }, severity: { type: integer }, owner: { type: string } } }
+  - id: iris.alert.merge_into_case
+    title: Merge alert into case
+    description: Merge an IRIS alert into a case, importing its IOCs and assets.
+    side_effect: write
+    risk: medium
+    supports_dry_run: true
+    entrypoint: "actions/iris.py:alert_merge"
+    params_schema: { type: object, additionalProperties: false, required: [alert_id, case_id], properties: { alert_id: { type: integer }, case_id: { type: integer }, note: { type: string } } }
+  - id: iris.ioc.add
+    title: Add IOC
+    description: Add an IOC to an IRIS case; IOC type and TLP names are resolved to the instance's ids.
+    side_effect: write
+    risk: low
+    supports_dry_run: true
+    entrypoint: "actions/iris.py:ioc_add"
+    params_schema:
+      type: object
+      additionalProperties: false
+      required: [case_id, value, type]
+      properties: { case_id: { type: integer }, value: { type: string }, type: { type: string, description: "SOAR type (ip, domain, url, hash, email, ...) or IRIS type name" }, tlp: { type: string, default: amber }, description: { type: string }, tags: { type: array, items: { type: string } } }
+  - { id: iris.ioc.list, title: List IOCs, description: List the IOCs of an IRIS case., side_effect: read, risk: low, supports_dry_run: true, entrypoint: "actions/iris.py:ioc_list", params_schema: { type: object, additionalProperties: false, required: [case_id], properties: { case_id: { type: integer } } } }
+  - id: iris.asset.add
+    title: Add asset
+    description: Add an asset (host, account, ...) to an IRIS case.
+    side_effect: write
+    risk: low
+    supports_dry_run: true
+    entrypoint: "actions/iris.py:asset_add"
+    params_schema: { type: object, additionalProperties: false, required: [case_id, name], properties: { case_id: { type: integer }, name: { type: string }, type: { type: string, default: "Windows - Computer" }, ip: { type: string }, description: { type: string } } }
+  - id: iris.note.add
+    title: Add note
+    description: Add a note to an IRIS case (in a "SOAR" note group, created when missing).
+    side_effect: write
+    risk: low
+    supports_dry_run: true
+    entrypoint: "actions/iris.py:note_add"
+    params_schema: { type: object, additionalProperties: false, required: [case_id, title, content], properties: { case_id: { type: integer }, title: { type: string }, content: { type: string }, group: { type: string } } }
+  - id: iris.timeline.event.add
+    title: Add timeline event
+    description: Add an event to an IRIS case timeline.
+    side_effect: write
+    risk: low
+    supports_dry_run: true
+    entrypoint: "actions/iris.py:timeline_add"
+    params_schema: { type: object, additionalProperties: false, required: [case_id, title, date], properties: { case_id: { type: integer }, title: { type: string }, date: { type: string, format: date-time }, content: { type: string }, category_id: { type: integer } } }
+  - id: iris.task.create
+    title: Create task
+    description: Create a task in an IRIS case and assign it to IRIS users.
+    side_effect: write
+    risk: low
+    supports_dry_run: true
+    entrypoint: "actions/iris.py:task_create"
+    params_schema: { type: object, additionalProperties: false, required: [case_id, title], properties: { case_id: { type: integer }, title: { type: string }, description: { type: string }, assignees: { type: array, items: { type: string } } } }

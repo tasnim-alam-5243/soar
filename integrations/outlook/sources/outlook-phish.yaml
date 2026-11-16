@@ -1,0 +1,17 @@
+# The shared phishing-report mailbox (spec 10.1). Disabled until a connection named m365 exists
+# and config.mailbox is set: PATCH /sources/{id} {"enabled": true, "config": {...}}.
+name: outlook-phish
+system: m365
+adapter: graph_mail
+parser: json
+mapping: outlook_reported_email@1
+schedule: every 60s
+dedup: { window: 10m }
+enabled: false
+config:
+  connection: m365
+  mailbox: phishing@corp.example
+  folder: inbox
+  page_size: 50
+  cursor: { field: receivedDateTime, overlap: 120s, initial: 24h }
+  max_pages_per_cycle: 10

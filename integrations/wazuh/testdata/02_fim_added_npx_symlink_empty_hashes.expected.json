@@ -1,0 +1,36 @@
+{
+  "dedup_window_sec": 600,
+  "description": "File '/usr/bin/npx-22' added\nMode: scheduled\n",
+  "entities": {
+    "hosts": [
+      "web01"
+    ]
+  },
+  "external_id": "1793256512.10950",
+  "fingerprint": "0d3e664ca7840fb7648c87adbb3149f4998b8483ef57fd7bb809958c58145926",
+  "kind": "alert",
+  "mitre": null,
+  "observables": [
+    {
+      "type": "host",
+      "value": "web01"
+    },
+    {
+      "type": "file_path",
+      "value": "/usr/bin/npx-22"
+    }
+  ],
+  "occurred_at": "2026-10-29T06:48:32.101Z",
+  "original_severity": "5",
+  "route": "",
+  "severity": 2,
+  "source_id": "wazuh-prod",
+  "system": "wazuh-prod",
+  "tags": [
+    "ossec",
+    "syscheck",
+    "syscheck_entry_added",
+    "syscheck_file"
+  ],
+  "title": "File added to the system."
+}

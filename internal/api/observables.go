@@ -3,8 +3,10 @@ package api
 import "net/http"
 
 func (s *Server) listObservables(w http.ResponseWriter, r *http.Request) error {
-	q, v, err := listQuery(r, sortSpec{fields: map[string]string{"last_seen": "last_seen", "first_seen": "first_seen"},
-		defaultName: "last_seen", defaultDesc: true}, "type", "value", "case_id")
+	q, v, err := listQuery(r, sortSpec{
+		fields:      map[string]string{"last_seen": "last_seen", "first_seen": "first_seen"},
+		defaultName: "last_seen", defaultDesc: true,
+	}, "type", "value", "case_id")
 	if err != nil {
 		return err
 	}

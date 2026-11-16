@@ -1,0 +1,48 @@
+{
+  "dedup_window_sec": 600,
+  "description": "File '/usr/bin/make-dummy-cert' added\nMode: scheduled\n",
+  "entities": {
+    "hosts": [
+      "web01"
+    ]
+  },
+  "external_id": "1793256511.10907",
+  "fingerprint": "036d01922c5653c59414266c7bab5ad1791909389cb73c7b344e3f008c1f0d1b",
+  "kind": "alert",
+  "mitre": null,
+  "observables": [
+    {
+      "type": "host",
+      "value": "web01"
+    },
+    {
+      "type": "file_path",
+      "value": "/usr/bin/make-dummy-cert"
+    },
+    {
+      "type": "hash",
+      "value": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+    },
+    {
+      "type": "hash",
+      "value": "aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d"
+    },
+    {
+      "type": "hash",
+      "value": "5d41402abc4b2a76b9719d911017c592"
+    }
+  ],
+  "occurred_at": "2026-10-29T06:48:31.597Z",
+  "original_severity": "5",
+  "route": "",
+  "severity": 2,
+  "source_id": "wazuh-prod",
+  "system": "wazuh-prod",
+  "tags": [
+    "ossec",
+    "syscheck",
+    "syscheck_entry_added",
+    "syscheck_file"
+  ],
+  "title": "File added to the system."
+}

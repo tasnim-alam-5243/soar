@@ -3,11 +3,13 @@ package api
 import (
 	"net/http"
 	"regexp"
+	"strings"
 
 	"github.com/yourorg/soar/internal/domain"
+	"github.com/yourorg/soar/internal/security"
 )
 
-var secretNameRe = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,100}$`)
+var secretNameRe = regexp.MustCompile(`^(env:[A-Za-z_][A-Za-z0-9_]{0,99}|[A-Za-z0-9_.-]{1,100})$`)
 
 type connectionIn struct {
 	ConnectorID string         `json:"connector_id"`
@@ -33,22 +35,30 @@ func (s *Server) createConnection(w http.ResponseWriter, r *http.Request) error 
 		v.oneOf("auth_type", in.AuthType, "none", "api_key", "basic", "bearer", "oauth2_client_credentials")
 		for k, val := range in.SecretRefs {
 			ref, ok := val.(string)
-			if !ok || !secretNameRe.MatchString(ref) {
+			switch {
+			case !ok || !secretNameRe.MatchString(ref):
 				v.add("secret_refs."+k, "must be the name of a secret (letters, digits, . _ -), never the secret itself")
+			case strings.HasPrefix(ref, "env:") && !security.EnvRefAllowed(strings.TrimPrefix(ref, "env:"), security.UseConnection):
+				// the process environment also holds the platform's own keys
+				v.add("secret_refs."+k, "%s", security.EnvRefRule(security.UseConnection))
 			}
 		}
 		if err := v.err(); err != nil {
 			return domain.Connection{}, "", err
 		}
-		doc := domain.Connection{Meta: domain.NewMeta("con"), ConnectorID: in.ConnectorID, Name: in.Name,
-			AuthType: in.AuthType, SecretRefs: in.SecretRefs, Config: in.Config}
+		doc := domain.Connection{
+			Meta: domain.NewMeta("con"), ConnectorID: in.ConnectorID, Name: in.Name,
+			AuthType: in.AuthType, SecretRefs: in.SecretRefs, Config: in.Config,
+		}
 		return doc, doc.ID, nil
 	})
 }
 
 func (s *Server) listConnections(w http.ResponseWriter, r *http.Request) error {
-	q, v, err := listQuery(r, sortSpec{fields: map[string]string{"created_at": "created_at", "name": "name"},
-		defaultName: "created_at", defaultDesc: true}, "connector_id")
+	q, v, err := listQuery(r, sortSpec{
+		fields:      map[string]string{"created_at": "created_at", "name": "name"},
+		defaultName: "created_at", defaultDesc: true,
+	}, "connector_id")
 	if err != nil {
 		return err
 	}

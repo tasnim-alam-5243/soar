@@ -275,8 +275,10 @@ func RunStateSuite(t *testing.T, newRepo func(t *testing.T, maxRetries int) stor
 func RunTimeSeriesSuite(t *testing.T, newRepo func(t *testing.T) store.Repo[domain.Alert]) {
 	ctx := context.Background()
 	newAlert := func(source string, sev int) domain.Alert {
-		return domain.Alert{Meta: domain.NewMeta(domain.PrefixAlert), Kind: "alert", SourceID: source, Title: "t " + source,
-			Severity: sev, ReceivedAt: time.Now().UTC(), OccurrenceCount: 1}
+		return domain.Alert{
+			Meta: domain.NewMeta(domain.PrefixAlert), Kind: "alert", SourceID: source, Title: "t " + source,
+			Severity: sev, ReceivedAt: time.Now().UTC(), OccurrenceCount: 1,
+		}
 	}
 
 	t.Run("create_get_save", func(t *testing.T) {

@@ -6,6 +6,7 @@ package opensearch
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,6 +15,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/yourorg/soar/internal/config"
 )
 
 // Client is a minimal OpenSearch HTTP client.
@@ -27,11 +30,28 @@ type Client struct {
 
 // New builds a client for one or more node URLs. TLS options are added in Step 3.
 func New(urls []string, user, pass string) *Client {
+	return NewTLS(urls, user, pass, nil)
+}
+
+// NewTLS is New with a TLS configuration for https URLs (a private CA, a client
+// certificate for mTLS); nil uses the system roots.
+func NewTLS(urls []string, user, pass string, tc *tls.Config) *Client {
+	var rt http.RoundTripper = http.DefaultTransport
+	if tc != nil {
+		t := http.DefaultTransport.(*http.Transport).Clone()
+		t.TLSClientConfig = tc.Clone()
+		rt = t
+	}
 	return &Client{
 		urls: urls, user: user, pass: pass,
-		http: &http.Client{Timeout: 5 * time.Second},
-		slow: &http.Client{Timeout: 60 * time.Second},
+		http: &http.Client{Timeout: 5 * time.Second, Transport: rt},
+		slow: &http.Client{Timeout: 60 * time.Second, Transport: rt},
 	}
+}
+
+// Open connects with the process configuration (URLs, credentials, TLS).
+func Open(cfg config.Config) *Client {
+	return NewTLS(cfg.OSURLs, cfg.OSUser, cfg.OSPassword, cfg.OSTLS)
 }
 
 // APIError is a non-2xx answer from OpenSearch.
@@ -41,6 +61,9 @@ type APIError struct {
 	Path   string
 	Body   string
 }
+
+// HTTPStatus lets store.Unavailable classify the error without importing this package.
+func (e *APIError) HTTPStatus() int { return e.Status }
 
 func (e *APIError) Error() string {
 	b := e.Body

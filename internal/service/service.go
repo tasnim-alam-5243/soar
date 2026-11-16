@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+
 	"github.com/yourorg/soar/internal/config"
 	"github.com/yourorg/soar/internal/obs"
 	"github.com/yourorg/soar/internal/queue"
@@ -24,15 +26,16 @@ func Run(ctx context.Context, role string, cfg config.Config, log *slog.Logger) 
 func RunWith(ctx context.Context, role string, cfg config.Config, log *slog.Logger, mount func(mux *http.ServeMux, osc *opensearch.Client)) error {
 	log.Info("starting", "config", cfg)
 
-	osc := opensearch.New(cfg.OSURLs, cfg.OSUser, cfg.OSPassword)
+	osc := opensearch.Open(cfg)
 	h := obs.NewHealth(log, 2*time.Second, checks(cfg, osc)...)
 	mux := http.NewServeMux()
 	h.Routes(mux)
+	mux.Handle("GET /metrics", promhttp.HandlerFor(obs.Registry, promhttp.HandlerOpts{}))
 	if mount != nil {
 		mount(mux, osc)
 	}
 
-	return obs.Serve(ctx, log, cfg.AddrFor(role), obs.Middleware(log, mux))
+	return obs.ServeTLS(ctx, log, cfg.AddrFor(role), obs.Middleware(log, mux), cfg.ServerTLS, cfg.ClientCertReq)
 }
 
 func checks(cfg config.Config, osc *opensearch.Client) []obs.Check {

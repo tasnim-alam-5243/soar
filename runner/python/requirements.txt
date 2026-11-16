@@ -1,0 +1,5 @@
+# Runtime of the sandboxed runner. grpcio must be >= the version that generated the stubs (make proto).
+grpcio==1.67.1
+protobuf==5.29.6
+PyYAML==6.0.3
+cryptography==44.0.0

@@ -1,0 +1,15 @@
+# Action policy (spec 20.1). Rules are CEL, first match wins; then the defaults apply:
+#   - dry runs are allowed
+#   - destructive actions need a human approval unless an approval node directly precedes them
+#   - actions with approval_policy thresholds (e.g. Outlook sends over 50 recipients) need approval
+#   - agents (later) need approval for any write
+# Variables: actor, actor_type, action, side_effect, risk, args, dry_run, pre_approved
+rules: []
+# Examples:
+#  - name: never-purge
+#    when: 'action == "outlook.mail.purge"'
+#    effect: deny
+#    reason: permanent deletion is disabled on this installation
+#  - name: wazuh-block-needs-approval
+#    when: 'action == "wazuh.active_response.run"'
+#    effect: require_approval

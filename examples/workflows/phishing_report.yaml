@@ -1,0 +1,58 @@
+# Reported phishing email (outlook-phish source): open a local case and an IRIS case, find the
+# same message in the target mailboxes, and after approval move every copy to Deleted Items.
+# Inputs can be overridden at run time: mailboxes (list of UPNs to sweep).
+triggers:
+  - type: alert
+    match: 'alert.source_id == "outlook-phish"'
+inputs:
+  - name: sender
+    from: 'alert.observables.exists(o, o.type == "email") ? alert.observables.filter(o, o.type == "email")[0].value : ""'
+    required: true
+  - name: subject
+    from: 'alert.ext.subject'
+  - name: mailboxes
+    default: []
+nodes:
+  - id: open_case
+    action: case.create
+    params: { title: '"Phishing: " + inputs.subject + " from " + inputs.sender', severity: 3, tags: '["phishing"]' }
+  - id: iris_case
+    action: iris.case.create
+    params: { name: '"Phishing from " + inputs.sender', description: 'alert.description', soar_case_id: 'steps.open_case.output.case_id' }
+    on_error: [search]
+  - id: link_iris
+    action: case.update
+    params: { case_id: 'steps.open_case.output.case_id', summary: '"IRIS case " + string(steps.iris_case.output.case_id) + ": " + steps.iris_case.output.url' }
+  - id: search
+    action: outlook.mail.search
+    when: 'size(inputs.mailboxes) > 0'
+    params: { mailboxes: 'inputs.mailboxes', from: 'inputs.sender', subject: 'inputs.subject', top: 50 }
+  - id: anything
+    type: branch
+    cases:
+      - when: 'steps.search.status == "succeeded" && size(steps.search.output.messages) > 0'
+        next: [ask]
+    default: [thank]
+  - id: ask
+    type: approval
+    message: '"Move " + string(size(steps.search.output.messages)) + " copies from " + inputs.sender + " to Deleted Items?"'
+    timeout: 8h
+    on_reject: [thank]
+  - id: purge_copies
+    type: foreach
+    items: 'steps.search.output.messages'
+    concurrency: 4
+    action: outlook.mail.delete
+    params: { mailbox: 'item.mailbox', message_id: 'item.id' }
+    continue_on_error: true
+  - id: thank
+    action: outlook.mail.reply
+    params: { mailbox: 'alert.ext.toRecipients[0].emailAddress.address', message_id: 'alert.external_id', comment: '"Thank you for reporting this email. The security team is on it."' }
+    continue_on_error: true
+edges:
+  - open_case -> iris_case
+  - iris_case -> link_iris
+  - link_iris -> search
+  - search -> anything
+  - ask -> purge_copies
+  - purge_copies -> thank

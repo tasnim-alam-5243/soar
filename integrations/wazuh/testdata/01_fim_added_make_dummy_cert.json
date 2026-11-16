@@ -1,0 +1,66 @@
+{
+  "timestamp": "2026-10-29T12:48:31.597+0600",
+  "rule": {
+    "level": 5,
+    "description": "File added to the system.",
+    "id": "554",
+    "firedtimes": 1,
+    "mail": false,
+    "groups": [
+      "ossec",
+      "syscheck",
+      "syscheck_entry_added",
+      "syscheck_file"
+    ],
+    "pci_dss": [
+      "11.5"
+    ],
+    "gdpr": [
+      "II_5.1.f"
+    ],
+    "hipaa": [
+      "164.312.c.1",
+      "164.312.c.2"
+    ],
+    "nist_800_53": [
+      "SI.7"
+    ],
+    "tsc": [
+      "PI1.4",
+      "PI1.5",
+      "CC6.1",
+      "CC6.8",
+      "CC7.2",
+      "CC7.3"
+    ]
+  },
+  "agent": {
+    "id": "001",
+    "name": "web01"
+  },
+  "manager": {
+    "name": "wazuh-manager"
+  },
+  "id": "1793256511.10907",
+  "decoder": {
+    "name": "syscheck_new_entry"
+  },
+  "location": "syscheck",
+  "full_log": "File '/usr/bin/make-dummy-cert' added\nMode: scheduled\n",
+  "syscheck": {
+    "path": "/usr/bin/make-dummy-cert",
+    "mode": "scheduled",
+    "size_after": "3000",
+    "perm_after": "rwxr-xr-x",
+    "uid_after": "0",
+    "gid_after": "0",
+    "uname_after": "root",
+    "gname_after": "root",
+    "mtime_after": "2026-10-29T06:40:00",
+    "inode_after": "123456",
+    "event": "added",
+    "md5_after": "5d41402abc4b2a76b9719d911017c592",
+    "sha1_after": "aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d",
+    "sha256_after": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+  }
+}

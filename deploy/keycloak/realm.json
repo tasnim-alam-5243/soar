@@ -1,0 +1,75 @@
+{
+  "realm": "soar",
+  "enabled": true,
+  "displayName": "SOAR",
+  "sslRequired": "external",
+  "registrationAllowed": false,
+  "loginWithEmailAllowed": true,
+  "bruteForceProtected": true,
+  "accessTokenLifespan": 900,
+  "ssoSessionIdleTimeout": 3600,
+  "roles": {
+    "realm": [
+      { "name": "admin", "description": "SOAR administrator" },
+      { "name": "engineer", "description": "Builds workflows, sources, connections" },
+      { "name": "analyst", "description": "Works alerts and cases, runs playbooks, approves actions" },
+      { "name": "viewer", "description": "Read-only" },
+      { "name": "service", "description": "Machine accounts" }
+    ]
+  },
+  "clients": [
+    {
+      "clientId": "soar-web",
+      "name": "SOAR web UI",
+      "enabled": true,
+      "publicClient": true,
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": false,
+      "implicitFlowEnabled": false,
+      "redirectUris": ["http://localhost:8080/*", "http://127.0.0.1:8080/*", "http://localhost:3000/*", "http://127.0.0.1:3000/*"],
+      "webOrigins": ["http://localhost:8080", "http://127.0.0.1:8080", "http://localhost:3000", "http://127.0.0.1:3000"],
+      "attributes": { "pkce.code.challenge.method": "S256", "post.logout.redirect.uris": "http://localhost:8080/*##http://127.0.0.1:8080/*##http://localhost:3000/*##http://127.0.0.1:3000/*" },
+      "protocolMappers": [
+        {
+          "name": "soar-api audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "config": { "included.client.audience": "soar-api", "access.token.claim": "true", "id.token.claim": "false" }
+        }
+      ]
+    },
+    {
+      "clientId": "soar-api",
+      "name": "SOAR API (audience)",
+      "enabled": true,
+      "bearerOnly": true,
+      "publicClient": false
+    },
+    {
+      "clientId": "soar-cli",
+      "name": "SOAR CLI and tests (development only)",
+      "enabled": true,
+      "publicClient": true,
+      "standardFlowEnabled": false,
+      "directAccessGrantsEnabled": true,
+      "protocolMappers": [
+        {
+          "name": "soar-api audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "config": { "included.client.audience": "soar-api", "access.token.claim": "true", "id.token.claim": "false" }
+        }
+      ]
+    }
+  ],
+  "users": [
+    { "username": "admin", "enabled": true, "email": "admin@soar.local", "emailVerified": true, "firstName": "Dev", "lastName": "Admin",
+      "credentials": [{ "type": "password", "value": "admin", "temporary": false }], "realmRoles": ["admin"] },
+    { "username": "engineer", "enabled": true, "email": "engineer@soar.local", "emailVerified": true, "firstName": "Dev", "lastName": "Engineer",
+      "credentials": [{ "type": "password", "value": "engineer", "temporary": false }], "realmRoles": ["engineer"] },
+    { "username": "analyst", "enabled": true, "email": "analyst@soar.local", "emailVerified": true, "firstName": "Dev", "lastName": "Analyst",
+      "credentials": [{ "type": "password", "value": "analyst", "temporary": false }], "realmRoles": ["analyst"] },
+    { "username": "viewer", "enabled": true, "email": "viewer@soar.local", "emailVerified": true, "firstName": "Dev", "lastName": "Viewer",
+      "credentials": [{ "type": "password", "value": "viewer", "temporary": false }], "realmRoles": ["viewer"] }
+  ]
+}
