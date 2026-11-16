@@ -181,6 +181,7 @@ type Alert struct {
 	Entities         *Entities    `json:"entities,omitempty"`
 	Mitre            *Mitre       `json:"mitre,omitempty"`
 	Verdict          string       `json:"verdict,omitempty"` // true_positive|false_positive|benign|unknown
+	Assignee         string       `json:"assignee,omitempty"`
 	Ext              JSON         `json:"ext,omitempty"`
 	RawRef           string       `json:"raw_ref,omitempty"`
 	OccurredAt       *time.Time   `json:"occurred_at,omitempty"`

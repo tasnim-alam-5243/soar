@@ -275,6 +275,53 @@ func TestEventsBecomeAlertsObservablesAndRepeatsAreGrouped(t *testing.T) {
 	}
 }
 
+type uiRec struct {
+	mu  sync.Mutex
+	evs []map[string]any
+}
+
+func (u *uiRec) Notify(subject string, v any) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if subject == "ui.alerts" {
+		u.evs = append(u.evs, v.(map[string]any))
+	}
+}
+
+func TestNewAlertsGetStatusNewAndAreAnnouncedOnce(t *testing.T) {
+	r := newRig(t)
+	ui := &uiRec{}
+	r.p.UI = ui
+	noStatus := event("b.1", "port scan", "fp-scan", 5)
+	noStatus.Alert.Status = "" // mappings need not set one
+	r.publish(noStatus, "")
+	r.publish(event("b.2", "port scan", "fp-scan", 5), "") // a repeat: counted, not announced
+	r.publish(event("b.3", "usb inserted", "fp-usb", 2), "")
+	r.drain(5 * time.Second)
+
+	for k, d := range r.bulk.docs {
+		if strings.HasPrefix(k, "soar-alerts/") && d["status"] != "new" {
+			t.Errorf("alert %s created with status %v, want new", k, d["status"])
+		}
+	}
+	ui.mu.Lock()
+	defer ui.mu.Unlock()
+	if len(ui.evs) != 2 {
+		t.Fatalf("two alerts created, want two UI events, got %d: %v", len(ui.evs), ui.evs)
+	}
+	titles := map[any]bool{}
+	for _, ev := range ui.evs {
+		data := ev["data"].(map[string]any)
+		titles[data["title"]] = true
+		if ev["topic"] != "alerts" || ev["id"] == "" || data["severity"] == nil {
+			t.Errorf("event: %v", ev)
+		}
+	}
+	if !titles["port scan"] || !titles["usb inserted"] {
+		t.Errorf("titles: %v", titles)
+	}
+}
+
 func TestSameExternalIdIsADuplicateAndNotCountedTwice(t *testing.T) {
 	r := newRig(t)
 	r.publish(event("dup.1", "x", "fp-x", 3), "m1")

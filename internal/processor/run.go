@@ -40,7 +40,7 @@ func Run(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 		log.Warn("could not load workflow triggers yet; retrying in the background", "error", err.Error())
 	}
 	p := &Processor{
-		Cons: cons, Bulk: opensearch.NewBulk(osc, opensearch.BulkConfig{}), St: st, DLQ: q, Triggers: triggers, Waits: waits, Starts: q, Log: log,
+		Cons: cons, Bulk: opensearch.NewBulk(osc, opensearch.BulkConfig{}), St: st, DLQ: q, Triggers: triggers, Waits: waits, Starts: q, UI: q, Log: log,
 		Cfg: Config{Workers: cfg.ProcessorWorkers, Partitions: cfg.Partitions},
 	}
 	return service.RunRole(ctx, "processor", cfg, log, func(*http.ServeMux, *opensearch.Client) {},

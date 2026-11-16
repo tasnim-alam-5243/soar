@@ -1,4 +1,4 @@
-# Production stack (spec section 15): the SOAR roles, the runner, the web UI and a 3-node NATS
+# Production stack (spec section 15): the SOAR roles (the api role serves the web UI), the runner and a 3-node NATS
 # JetStream cluster (replicas 3, quorum commit). OpenSearch, S3-compatible object storage and Keycloak are expected to
 # be run as managed services (TLS, backups, their own HA); point the variables in .env at them.
 #
@@ -99,7 +99,12 @@ services:
       SOAR_OIDC_ISSUER: ${SOAR_OIDC_ISSUER:?set SOAR_OIDC_ISSUER (https://sso.example/realms/soar)}
       SOAR_OIDC_AUDIENCE: ${SOAR_OIDC_AUDIENCE:-soar-api}
       SOAR_BOOTSTRAP_API_KEY: ${SOAR_BOOTSTRAP_API_KEY:-}
-    deploy: { replicas: 2, resources: { limits: { cpus: "2", memory: 1g } } }
+      SOAR_UI_OIDC_CLIENT_ID: ${SOAR_OIDC_WEB_CLIENT:-soar-web}   # the UI signs in at SOAR_OIDC_ISSUER
+    # The api role serves the REST API and the web UI. Put a TLS-terminating proxy in front: OIDC
+    # login in the browser needs HTTPS. One replica per host port; to scale, run more api
+    # services behind a load balancer (live updates reach every replica through NATS).
+    ports: ["${SOAR_API_BIND:-127.0.0.1}:8080:8080"]
+    deploy: { resources: { limits: { cpus: "2", memory: 1g } } }
     healthcheck: &hc
       test: ["CMD", "/soar", "healthcheck", "http://127.0.0.1:8080/readyz"]
       interval: 10s
@@ -171,19 +176,6 @@ services:
     volumes: ["./certs:/etc/soar/certs:ro,z"]
     networks: [runner, egress]
     deploy: { replicas: 2, resources: { limits: { cpus: "4", memory: 2g } } }
-
-  web:
-    image: ${SOAR_WEB_IMAGE:-soar-web:dev}
-    restart: unless-stopped
-    read_only: true
-    tmpfs: ["/tmp", "/var/cache/nginx", "/var/run"]
-    environment:
-      SOAR_OIDC_AUTHORITY: ${SOAR_OIDC_ISSUER:?}
-      SOAR_OIDC_CLIENT_ID: ${SOAR_OIDC_WEB_CLIENT:-soar-web}
-      SOAR_OIDC_ORIGIN: ${SOAR_OIDC_ORIGIN:?the scheme://host of the OIDC provider, for the CSP}
-    ports: ["${SOAR_WEB_BIND:-127.0.0.1}:3000:8080"]   # serve through a TLS-terminating proxy
-    depends_on:
-      api: { condition: service_healthy }
 
 networks:
   default: {}

@@ -14,21 +14,21 @@ LDFLAGS   := -s -w -X $(MODULE)/internal/obs.Version=$(VERSION) -X $(MODULE)/int
 help: ## Show this help
 	@awk 'BEGIN{FS=":.*## "} /^[a-zA-Z0-9_-]+:.*## /{printf "  \033[36m%-18s\033[0m %s\n",$$1,$$2}' $(MAKEFILE_LIST)
 
-.PHONY: build
-build: ## Build the soar binary into bin/
+.PHONY: build build-go
+build: web-build ## Build bin/soar with the web UI embedded (one binary: API + UI; needs Node)
+	CGO_ENABLED=0 $(GO) build -tags ui -trimpath -ldflags '$(LDFLAGS)' -o bin/soar ./cmd/soar
+
+build-go: ## Build bin/soar without the UI (no Node needed; / explains how to get the UI)
 	CGO_ENABLED=0 $(GO) build -trimpath -ldflags '$(LDFLAGS)' -o bin/soar ./cmd/soar
 
-.PHONY: image image-soar image-runner image-web
-image: image-soar image-runner image-web ## Build all container images (soar, soar-runner, soar-web)
+.PHONY: image image-soar image-runner
+image: image-soar image-runner ## Build all container images (soar with the UI, soar-runner)
 
-image-soar: ## Build the soar:dev image (every Go role)
+image-soar: ## Build the soar:dev image (every Go role; the api role serves the UI)
 	$(DOCKER) build --pull -f deploy/docker/Dockerfile --build-arg VERSION=$(VERSION) --build-arg COMMIT=$(COMMIT) -t soar:dev .
 
 image-runner: ## Build the soar-runner:dev image (sandboxed Python runner + integrations)
 	$(DOCKER) build -f deploy/docker/runner.Dockerfile -t soar-runner:dev .
-
-image-web: ## Build the soar-web:dev image (React UI behind nginx)
-	$(DOCKER) build -f deploy/docker/web.Dockerfile -t soar-web:dev .
 
 PY_VENV := runner/python/.venv
 PY      := $(PY_VENV)/bin/python
@@ -57,14 +57,15 @@ web-install: ## Install UI dependencies
 gen-api: ## Regenerate the UI's API types from api/openapi.yaml
 	cd web && npm run gen:api
 
-web-dev: ## UI dev server on :3000 (proxies /api to 127.0.0.1:8080)
+web-dev: ## UI dev server on :3000 with hot reload (proxies /api to 127.0.0.1:8080, or SOAR_API)
 	cd web && npm run dev
 
 web-test: ## UI unit tests and type check
 	cd web && npm run typecheck && npm test
 
-web-build: ## Production UI bundle in web/dist
-	cd web && npm run build
+web-build: ## Production UI bundle into internal/webui/dist (embedded by `make build`)
+	@test -d web/node_modules || (cd web && npm ci --no-audit --no-fund)
+	cd web && npm run gen:api && npm run build
 
 .PHONY: up
 up: image ## Build the image, start the stack, wait until /readyz is 200

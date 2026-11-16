@@ -12,3 +12,5 @@ runner/python/.venv/
 /soar
 /loadgen
 /stepcheck
+# web UI bundle embedded by `make build` (built from web/)
+internal/webui/dist/

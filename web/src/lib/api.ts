@@ -15,6 +15,11 @@ export type Source = Schemas["Source"];
 export type Connection = Schemas["Connection"];
 export type Principal = Schemas["Principal"];
 export type FieldError = Schemas["FieldError"];
+export type Dashboard = Schemas["Dashboard"];
+export type DashboardRange = Schemas["DashboardRange"];
+export type AlertPatch = Schemas["AlertPatch"];
+export type TimelineEvent = Schemas["TimelineEvent"];
+export type CaseAlert = Schemas["CaseAlert"];
 
 // Problem is an RFC 9457 error from the API, thrown by unwrap.
 export class Problem extends Error {

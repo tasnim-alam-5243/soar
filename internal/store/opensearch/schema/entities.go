@@ -75,7 +75,7 @@ func Entities() []Entity {
 			"observables": obj(Props{"type": kw(), "value": kw(), "role": kw()}),
 			"entities":    obj(Props{"hosts": kw(), "users": kw(), "accounts": kw()}),
 			"mitre":       obj(Props{"technique_ids": kw(), "techniques": kw(), "tactics": kw()}),
-			"verdict":     kw(), "ext": flat(), "raw_ref": kw(),
+			"verdict":     kw(), "assignee": kw(), "ext": flat(), "raw_ref": kw(),
 			"occurred_at": date(), "received_at": date(), "last_seen": date(),
 			"occurrence_count": long(), "case_id": kw(),
 		}},

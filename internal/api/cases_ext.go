@@ -48,6 +48,9 @@ func (s *Server) linkAlerts(w http.ResponseWriter, r *http.Request) error {
 	}
 	s.audit(r, "case.link_alerts", "case:"+id, nil, map[string]any{"alert_ids": linked})
 	s.notifyUI("cases", id, map[string]any{"linked": linked})
+	for _, aid := range linked {
+		s.notifyUI("alerts", aid, map[string]any{"case_id": id})
+	}
 	return getOne(w, r, s.st.Cases)
 }
 
@@ -128,6 +131,7 @@ func (s *Server) alertToCase(w http.ResponseWriter, r *http.Request) error {
 	}
 	s.audit(r, "alert.to_case", "case:"+caseID, nil, map[string]any{"alert_id": a.ID})
 	s.notifyUI("cases", caseID, map[string]any{"alert_id": a.ID})
+	s.notifyUI("alerts", a.ID, map[string]any{"case_id": caseID})
 	w.Header().Set("Location", Prefix+"/cases/"+caseID)
 	return writeResource(w, status, doc, ver)
 }

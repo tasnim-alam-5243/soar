@@ -131,6 +131,19 @@ func term(q *store.ListQuery, v url.Values, param, field string) {
 	q.Terms[field] = strings.Split(raw, ",")
 }
 
+// search adds the free-text filter of the q parameter over fields.
+func search(q *store.ListQuery, v url.Values, fields ...string) error {
+	s := strings.TrimSpace(v.Get("q"))
+	if s == "" {
+		return nil
+	}
+	if len(s) > 200 {
+		return badRequest("q must be at most 200 characters")
+	}
+	q.Search, q.SearchFields = s, fields
+	return nil
+}
+
 // timeRange adds from/to filters on a date field and validates them.
 func timeRange(q *store.ListQuery, v url.Values, field string) error {
 	rg := store.Range{Field: field}

@@ -3,6 +3,7 @@ package api
 import (
 	"errors"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -95,7 +96,7 @@ func (s *Server) listCases(w http.ResponseWriter, r *http.Request) error {
 	q, v, err := listQuery(r, sortSpec{
 		fields:      map[string]string{"created_at": "created_at", "updated_at": "updated_at", "severity": "severity", "title": "title.raw"},
 		defaultName: "created_at", defaultDesc: true,
-	}, "status", "severity", "assignee", "tag", "verdict")
+	}, "status", "severity", "assignee", "tag", "verdict", "q")
 	if err != nil {
 		return err
 	}
@@ -103,6 +104,9 @@ func (s *Server) listCases(w http.ResponseWriter, r *http.Request) error {
 		term(&q, v, f, f)
 	}
 	term(&q, v, "tag", "tags")
+	if err := search(&q, v, "title", "summary", "tags"); err != nil {
+		return err
+	}
 	page, err := s.st.Cases.List(r.Context(), q)
 	if err != nil {
 		return err
@@ -201,6 +205,14 @@ func (s *Server) patchCase(w http.ResponseWriter, r *http.Request) error {
 	if len(changed) > 0 {
 		s.timeline(r, doc.ID, "case.updated", map[string]any{"fields": strings.Join(changed, ",")})
 		s.notifyUI("cases", doc.ID, map[string]any{"status": doc.Status, "fields": changed})
+	}
+	if doc.Status == "closed" && slices.Contains(changed, "status") {
+		if ids := s.cases.CloseAlerts(r.Context(), doc); len(ids) > 0 {
+			s.timeline(r, doc.ID, "alerts.closed", map[string]any{"alert_ids": strings.Join(ids, ",")})
+			for _, id := range ids {
+				s.notifyUI("alerts", id, map[string]any{"status": "closed", "case_id": doc.ID})
+			}
+		}
 	}
 	return writeResource(w, http.StatusOK, doc, ver)
 }

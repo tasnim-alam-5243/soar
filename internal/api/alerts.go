@@ -2,11 +2,110 @@ package api
 
 import (
 	"net/http"
+	"slices"
 	"strconv"
+	"strings"
 
+	"github.com/yourorg/soar/internal/cases"
 	"github.com/yourorg/soar/internal/domain"
 	"github.com/yourorg/soar/internal/store"
 )
+
+// alertPatch is a triage update: fields that are absent stay unchanged.
+type alertPatch struct {
+	Status   *string `json:"status"`
+	Verdict  *string `json:"verdict"`
+	Assignee *string `json:"assignee"`
+}
+
+// patchAlert records triage: status, verdict and assignee. Closing needs a verdict (in
+// the request or already on the alert) so every closed alert carries an outcome.
+func (s *Server) patchAlert(w http.ResponseWriter, r *http.Request) error {
+	var p alertPatch
+	if err := decode(r, &p); err != nil {
+		return err
+	}
+	var v verr
+	if p.Status == nil && p.Verdict == nil && p.Assignee == nil {
+		v.add("", "give at least one of status, verdict, assignee")
+	}
+	if p.Status != nil {
+		v.oneOf("status", *p.Status, cases.AlertStatuses...)
+	}
+	if p.Verdict != nil {
+		v.oneOf("verdict", *p.Verdict, cases.AlertVerdicts...)
+	}
+	if p.Assignee != nil {
+		*p.Assignee = strings.TrimSpace(*p.Assignee)
+		v.maxLen("assignee", *p.Assignee, 200)
+	}
+	if err := v.err(); err != nil {
+		return err
+	}
+	var before domain.Alert
+	var changed []string
+	doc, ver, err := mutate(r, s.st.Alerts, r.PathValue("id"), func(a *domain.Alert) error {
+		before, changed = *a, changed[:0] // mutate may run again after a conflict
+		if p.Verdict != nil && *p.Verdict != a.Verdict {
+			a.Verdict, changed = *p.Verdict, append(changed, "verdict")
+		}
+		if p.Assignee != nil && *p.Assignee != a.Assignee {
+			a.Assignee, changed = *p.Assignee, append(changed, "assignee")
+		}
+		if p.Status != nil && *p.Status != a.Status {
+			a.Status, changed = *p.Status, append(changed, "status")
+		}
+		if a.Status == cases.AlertClosed && a.Verdict == "" && (slices.Contains(changed, "status") || slices.Contains(changed, "verdict")) {
+			return unprocessable([]FieldError{{Path: "verdict", Message: "is required to close an alert"}})
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	if len(changed) > 0 {
+		s.audit(r, "alert.triage", "alert:"+doc.ID,
+			map[string]any{"status": before.Status, "verdict": before.Verdict, "assignee": before.Assignee},
+			map[string]any{"status": doc.Status, "verdict": doc.Verdict, "assignee": doc.Assignee})
+		s.notifyUI("alerts", doc.ID, map[string]any{"status": doc.Status, "verdict": doc.Verdict, "assignee": doc.Assignee, "fields": changed})
+	}
+	return writeResource(w, http.StatusOK, doc, ver)
+}
+
+// assignees lists names to offer when assigning alerts and cases: the assignees already
+// in use plus the user principals. OIDC users are not principals, so names seen on
+// cases and alerts are what makes them pickable.
+func (s *Server) assignees(w http.ResponseWriter, r *http.Request) error {
+	ctx := r.Context()
+	seen := map[string]bool{}
+	var names []string
+	add := func(n string) {
+		if n = strings.TrimSpace(n); n != "" && !seen[n] {
+			seen[n] = true
+			names = append(names, n)
+		}
+	}
+	if t, err := store.TopTerms(ctx, s.st.Cases, store.ListQuery{}, "assignee", 100); err == nil {
+		for _, x := range t {
+			add(x.Value)
+		}
+	}
+	if t, err := store.TopTerms(ctx, s.st.Alerts, store.ListQuery{}, "assignee", 100); err == nil {
+		for _, x := range t {
+			add(x.Value)
+		}
+	}
+	if page, err := s.st.Principals.List(ctx, store.ListQuery{Terms: map[string][]string{"type": {"user"}}, Limit: 200, Sort: "name"}); err == nil {
+		for _, p := range page.Items {
+			if !p.Disabled {
+				add(p.Name)
+			}
+		}
+	}
+	add(s.actor(r))
+	slices.SortFunc(names, func(a, b string) int { return strings.Compare(strings.ToLower(a), strings.ToLower(b)) })
+	return writeJSON(w, http.StatusOK, map[string]any{"items": names})
+}
 
 var observableTypes = []string{"ip", "domain", "url", "hash", "email", "host", "user", "file_path"}
 
@@ -14,12 +113,18 @@ func (s *Server) listAlerts(w http.ResponseWriter, r *http.Request) error {
 	q, v, err := listQuery(r, sortSpec{
 		fields:      map[string]string{"received_at": "received_at", "severity": "severity", "occurrence_count": "occurrence_count", "last_seen": "last_seen"},
 		defaultName: "received_at", defaultDesc: true,
-	}, "source_id", "system", "kind", "status", "verdict", "severity", "min_severity", "case_id", "from", "to")
+	}, "source_id", "system", "kind", "status", "verdict", "severity", "min_severity", "case_id", "assignee", "q", "from", "to")
 	if err != nil {
 		return err
 	}
-	for _, f := range []string{"source_id", "system", "kind", "status", "verdict", "severity", "case_id"} {
+	for _, f := range []string{"source_id", "system", "kind", "status", "verdict", "severity", "case_id", "assignee"} {
 		term(&q, v, f, f)
+	}
+	if slices.Contains(q.Terms["status"], cases.AlertNew) {
+		q.OrMissing = append(q.OrMissing, "status") // alerts from before statuses existed count as new
+	}
+	if err := search(&q, v, "title", "description", "summary", "fingerprint", "observables.value", "entities.hosts", "entities.users", "tags"); err != nil {
+		return err
 	}
 	if m := v.Get("min_severity"); m != "" {
 		n, err := strconv.Atoi(m)

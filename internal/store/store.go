@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/yourorg/soar/internal/domain"
 )
@@ -63,6 +64,23 @@ type ListQuery struct {
 	Desc   bool
 	Limit  int    // default 50, max 200
 	After  string // cursor from a previous Page.NextCursor
+	// OrMissing names Terms fields that also match documents without the field, for
+	// documents written before the field existed (alerts without a status count as new).
+	OrMissing []string
+	// Search is free text that must match at least one of SearchFields (all of its words,
+	// case-insensitive). Empty: no text filter.
+	Search       string
+	SearchFields []string
+}
+
+// MissingOK reports whether field is listed in OrMissing.
+func (q ListQuery) MissingOK(field string) bool {
+	for _, f := range q.OrMissing {
+		if f == field {
+			return true
+		}
+	}
+	return false
 }
 
 // Page is one page of results. NextCursor is empty on the last page.
@@ -140,4 +158,64 @@ func Count[T any](ctx context.Context, r Repo[T], q ListQuery) (int64, error) {
 		return 0, ErrUnsupported
 	}
 	return c.Count(ctx, q)
+}
+
+// TimeBucket is one interval of a date histogram. Counts holds the count per value of
+// the split field, or under the key "" when no split field was asked for.
+type TimeBucket struct {
+	Start  time.Time
+	Counts map[string]int64
+}
+
+// Term is one value of a field and the number of matching documents that carry it.
+type Term struct {
+	Value string
+	Count int64
+}
+
+// Aggregator is implemented by repositories that can summarise matching documents
+// (dashboards). Both the OpenSearch and the memory store implement it.
+type Aggregator interface {
+	// Histogram counts the documents matching q per fixed interval of the date field
+	// field, from the interval holding from to the one holding to (empty intervals
+	// included), split by the values of split ("" = no split). Documents without a split
+	// value are not counted when a split is asked for.
+	Histogram(ctx context.Context, q ListQuery, field string, from, to time.Time, interval time.Duration, split string) ([]TimeBucket, error)
+	// TopTerms returns the size most frequent values of field among the documents
+	// matching q, most frequent first (ties: by value).
+	TopTerms(ctx context.Context, q ListQuery, field string, size int) ([]Term, error)
+}
+
+// Histogram runs Aggregator.Histogram on any repository that implements it.
+func Histogram[T any](ctx context.Context, r Repo[T], q ListQuery, field string, from, to time.Time, interval time.Duration, split string) ([]TimeBucket, error) {
+	a, ok := r.(Aggregator)
+	if !ok {
+		return nil, ErrUnsupported
+	}
+	if interval <= 0 || !to.After(from) {
+		return nil, fmt.Errorf("%w: histogram needs a positive interval and from before to", ErrInvalid)
+	}
+	return a.Histogram(ctx, q, field, from, to, interval, split)
+}
+
+// TopTerms runs Aggregator.TopTerms on any repository that implements it.
+func TopTerms[T any](ctx context.Context, r Repo[T], q ListQuery, field string, size int) ([]Term, error) {
+	a, ok := r.(Aggregator)
+	if !ok {
+		return nil, ErrUnsupported
+	}
+	if size <= 0 || size > 100 {
+		size = 10
+	}
+	return a.TopTerms(ctx, q, field, size)
+}
+
+// BucketStart returns the start of the fixed interval holding t. Intervals are aligned
+// to the Unix epoch, as OpenSearch's fixed_interval date histogram aligns them.
+func BucketStart(t time.Time, interval time.Duration) time.Time {
+	ms := interval.Milliseconds()
+	if ms <= 0 {
+		return t.UTC()
+	}
+	return time.UnixMilli(t.UnixMilli() - ((t.UnixMilli()%ms)+ms)%ms).UTC()
 }

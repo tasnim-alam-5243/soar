@@ -1,21 +1,26 @@
+import * as React from "react";
 import { cva, type VariantProps } from "class-variance-authority";
 import { cn } from "@/lib/utils";
 
-const badge = cva("inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-medium", {
-  variants: {
-    tone: {
-      gray: "border-transparent bg-secondary text-secondary-foreground",
-      blue: "border-transparent bg-blue-100 text-blue-800 dark:bg-blue-900/40 dark:text-blue-200",
-      green: "border-transparent bg-green-100 text-green-800 dark:bg-green-900/40 dark:text-green-200",
-      yellow: "border-transparent bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-200",
-      orange: "border-transparent bg-orange-100 text-orange-800 dark:bg-orange-900/40 dark:text-orange-200",
-      red: "border-transparent bg-red-100 text-red-800 dark:bg-red-900/40 dark:text-red-200",
-      outline: "text-foreground",
+const badge = cva(
+  "inline-flex max-w-full items-center gap-1 whitespace-nowrap rounded-[5px] border px-1.5 text-2xs font-medium leading-[18px] [&_svg]:size-3 [&_svg]:shrink-0",
+  {
+    variants: {
+      tone: {
+        gray: "border-line-strong bg-hover text-fg-2",
+        outline: "border-line-strong bg-transparent text-fg-2",
+        accent: "border-accent/30 bg-accent/10 text-accent",
+        blue: "border-accent/30 bg-accent/10 text-accent",
+        green: "border-good/30 bg-good/10 text-good",
+        yellow: "border-warn/30 bg-warn/10 text-warn",
+        orange: "border-serious/30 bg-serious/10 text-serious",
+        red: "border-crit/30 bg-crit/10 text-crit",
+      },
     },
+    defaultVariants: { tone: "gray" },
   },
-  defaultVariants: { tone: "gray" },
-});
+);
 
-export function Badge({ className, tone, ...p }: React.HTMLAttributes<HTMLSpanElement> & VariantProps<typeof badge>) {
-  return <span className={cn(badge({ tone }), className)} {...p} />;
-}
+export interface BadgeProps extends React.HTMLAttributes<HTMLSpanElement>, VariantProps<typeof badge> {}
+
+export const Badge = ({ className, tone, ...p }: BadgeProps) => <span className={cn(badge({ tone }), className)} {...p} />;

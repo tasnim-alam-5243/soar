@@ -167,7 +167,13 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Dashboard figures (alert volume, open cases, MTTR, automation rate, queue and source health) */
+        /**
+         * Dashboard figures (alert volume, open cases, MTTR, automation rate, queue and source health)
+         * @description Without `range` the response carries the fixed 24-hour figures only. With `range` it also
+         *     carries a `range` section: time series, top-5 lists and each figure for the previous period
+         *     of the same length. There is no 30-day range because retention keeps 7 days.
+         *
+         */
         get: operations["getDashboard"];
         put?: never;
         post?: never;
@@ -376,6 +382,33 @@ export interface paths {
         };
         /** Get one alert */
         get: operations["getAlert"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /**
+         * Triage an alert (status, verdict, assignee; absent fields stay as they are)
+         * @description Closing an alert needs a verdict, given in the same request or already on the alert.
+         */
+        patch: operations["patchAlert"];
+        trace?: never;
+    };
+    "/assignees": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Names to offer when assigning alerts and cases
+         * @description The assignees already used on cases and alerts plus the enabled user principals, sorted.
+         *     Needs alerts:write (every role that can assign holds it). OIDC users are not principals,
+         *     so they appear once they have been assigned something.
+         *
+         */
+        get: operations["listAssignees"];
         put?: never;
         post?: never;
         delete?: never;
@@ -1288,6 +1321,7 @@ export interface components {
                 tactics?: string[];
             };
             verdict?: string;
+            assignee?: string;
             ext?: {
                 [key: string]: unknown;
             };
@@ -1300,6 +1334,16 @@ export interface components {
             last_seen?: string;
             occurrence_count: number;
             case_id?: string;
+        };
+        AlertPatch: {
+            /** @enum {string} */
+            status?: "new" | "acknowledged" | "in_progress" | "closed";
+            /** @enum {string} */
+            verdict?: "" | "true_positive" | "false_positive" | "benign" | "unknown";
+            assignee?: string;
+        };
+        Assignees: {
+            items: string[];
         };
         AlertCreate: {
             title: string;
@@ -1944,6 +1988,53 @@ export interface components {
             errors?: {
                 [key: string]: string;
             };
+            range?: components["schemas"]["DashboardRange"];
+        };
+        DashboardRange: {
+            /** @enum {string} */
+            name: "1h" | "24h" | "7d";
+            /** Format: date-time */
+            from: string;
+            /** Format: date-time */
+            to: string;
+            /** @description width of each series bucket */
+            interval_seconds: number;
+            alerts: components["schemas"]["PeriodCount"];
+            /** @description alerts per bucket by severity ("1".."5") */
+            alert_series: components["schemas"]["SeriesPoint"][];
+            executions: components["schemas"]["PeriodCount"];
+            failed_executions: components["schemas"]["PeriodCount"];
+            /** @description executions per bucket by status */
+            execution_series: components["schemas"]["SeriesPoint"][];
+            cases_opened: components["schemas"]["PeriodCount"];
+            automation_rate: components["schemas"]["PeriodFloat"];
+            mttr_hours: components["schemas"]["PeriodFloat"];
+            top_rules: components["schemas"]["TermCount"][];
+            top_sources: components["schemas"]["TermCount"][];
+            top_hosts: components["schemas"]["TermCount"][];
+        };
+        PeriodCount: {
+            current: number;
+            /** @description the same figure for the period of equal length before */
+            previous: number;
+        };
+        PeriodFloat: {
+            current: number | null;
+            previous: number | null;
+        };
+        SeriesPoint: {
+            /**
+             * Format: date-time
+             * @description start of the bucket
+             */
+            t: string;
+            counts: {
+                [key: string]: number;
+            };
+        };
+        TermCount: {
+            value: string;
+            count: number;
         };
         ConnectionTestResult: {
             ok: boolean;
@@ -2260,7 +2351,9 @@ export interface operations {
     };
     getDashboard: {
         parameters: {
-            query?: never;
+            query?: {
+                range?: "1h" | "24h" | "7d";
+            };
             header?: never;
             path?: never;
             cookie?: never;
@@ -2276,6 +2369,7 @@ export interface operations {
                     "application/json": components["schemas"]["Dashboard"];
                 };
             };
+            400: components["responses"]["Problem"];
             default: components["responses"]["Problem"];
         };
     };
@@ -2537,12 +2631,16 @@ export interface operations {
                 source_id?: string;
                 system?: string;
                 kind?: string;
+                /** @description comma-separated; "new" also matches alerts that have no status yet */
                 status?: string;
                 verdict?: string;
                 /** @description Exact severity */
                 severity?: string;
                 min_severity?: number;
                 case_id?: string;
+                assignee?: string;
+                /** @description Free text over title, description, observables, hosts, users and tags (all words must match) */
+                q?: string;
                 from?: string;
                 to?: string;
             };
@@ -2622,6 +2720,63 @@ export interface operations {
             default: components["responses"]["Problem"];
         };
     };
+    patchAlert: {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description ETag from a previous response. If the resource changed since, the update fails with 409. */
+                "If-Match"?: components["parameters"]["IfMatch"];
+            };
+            path: {
+                id: components["parameters"]["Id"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AlertPatch"];
+            };
+        };
+        responses: {
+            /** @description The updated alert */
+            200: {
+                headers: {
+                    ETag?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Alert"];
+                };
+            };
+            400: components["responses"]["Problem"];
+            404: components["responses"]["Problem"];
+            409: components["responses"]["Problem"];
+            422: components["responses"]["Problem"];
+            default: components["responses"]["Problem"];
+        };
+    };
+    listAssignees: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The names */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Assignees"];
+                };
+            };
+            403: components["responses"]["Problem"];
+            default: components["responses"]["Problem"];
+        };
+    };
     alertToCase: {
         parameters: {
             query?: never;
@@ -2657,6 +2812,8 @@ export interface operations {
                 assignee?: string;
                 tag?: string;
                 verdict?: string;
+                /** @description Free text over title */
+                q?: string;
             };
             header?: never;
             path?: never;

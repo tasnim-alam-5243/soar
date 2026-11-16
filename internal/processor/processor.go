@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"log/slog"
+	"net/http"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -28,6 +29,34 @@ import (
 // Starter publishes start messages of new executions.
 type Starter interface {
 	PublishMany(ctx context.Context, ms []queue.Msg) []error
+}
+
+// Notifier publishes best-effort UI events (core NATS ui.<topic>, relayed by the API to /stream).
+type Notifier interface {
+	Notify(subject string, v any)
+}
+
+// maxAlertEvents caps the per-alert UI events of one batch; a flood of new alerts is
+// announced with one summary event instead, so the stream stays cheap during bursts.
+const maxAlertEvents = 20
+
+// notifyCreated announces the alerts a batch created. Severity and title ride along so
+// the UI can raise a toast for critical and high alerts without fetching them.
+func (p *Processor) notifyCreated(created []*item) {
+	if p.UI == nil || len(created) == 0 {
+		return
+	}
+	now := time.Now().UTC()
+	if len(created) > maxAlertEvents {
+		p.UI.Notify("ui.alerts", map[string]any{"topic": "alerts", "id": "", "data": map[string]any{"created": len(created)}, "at": now})
+		return
+	}
+	for _, it := range created {
+		a := it.ev.Alert
+		p.UI.Notify("ui.alerts", map[string]any{"topic": "alerts", "id": it.alertID, "at": now, "data": map[string]any{
+			"created": 1, "severity": a.Severity, "title": a.Title, "source_id": a.SourceID,
+		}})
+	}
 }
 
 // DLQ is the part of the queue client the processor needs.
@@ -96,6 +125,7 @@ type Processor struct {
 	Triggers *TriggerIndex
 	Waits    *WaitIndex // open event waits (nil: none are matched)
 	Starts   Starter    // publishes execution start messages (nil: the sweeper starts them)
+	UI       Notifier   // tells connected UIs about new alerts (nil: no live updates)
 	Log      *slog.Logger
 	Cfg      Config
 	Stats    Counters
@@ -457,6 +487,9 @@ func (p *Processor) HandleBatch(ctx context.Context, msgs []jetstream.Msg) {
 		doc.ReceivedAt = it.ev.ReceivedAt
 		doc.LastSeen = &t
 		doc.OccurrenceCount = 1
+		if doc.Status == "" {
+			doc.Status = "new" // the upsert only applies on creation; triage moves it on from there
+		}
 		if !it.applied {
 			ops = append(ops, store.BulkOp{Action: store.BulkUpdate, Index: names.Index("alerts"), ID: it.alertID, Retries: 5, Body: map[string]any{
 				"script": map[string]any{
@@ -519,8 +552,10 @@ func (p *Processor) HandleBatch(ctx context.Context, msgs []jetstream.Msg) {
 		return
 	}
 	var starts []queue.Msg
+	var created []*item        // alerts this batch created
 	marked := map[*item]bool{} // "applied" mark written
 	incOK := map[*item]bool{}  // alert increment written
+	defer func() { p.notifyCreated(created) }()
 	for i, r := range res {
 		it := refs[i].it
 		switch {
@@ -535,6 +570,9 @@ func (p *Processor) HandleBatch(ctx context.Context, msgs []jetstream.Msg) {
 		case r.OK():
 			if refs[i].kind == "alert" {
 				incOK[it] = true
+				if r.Status == http.StatusCreated { // the upsert created the alert (200: a repeat counted)
+					created = append(created, it)
+				}
 			}
 			if refs[i].kind == "execution" {
 				p.Stats.Executions.Add(1)

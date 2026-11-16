@@ -83,7 +83,9 @@ func (s *Server) Routes() []Route {
 		{"GET", "/alerts", s.listAlerts},
 		{"POST", "/alerts", s.createAlert},
 		{"GET", "/alerts/{id}", s.getAlert},
+		{"PATCH", "/alerts/{id}", s.patchAlert},
 		{"POST", "/alerts/{id}/case", s.alertToCase},
+		{"GET", "/assignees", s.assignees},
 
 		{"POST", "/cases", s.createCase},
 		{"GET", "/cases", s.listCases},

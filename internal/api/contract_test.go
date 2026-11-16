@@ -778,6 +778,90 @@ func TestContract(t *testing.T) {
 		}
 	})
 
+	t.Run("alert_triage", func(t *testing.T) {
+		h.t = t
+		now := time.Now().UTC()
+		mk := func(title, status string, sev int) string {
+			a := domain.Alert{
+				Meta: domain.NewMeta(domain.PrefixAlert), Kind: "alert", SourceID: "wazuh-prod", Title: title, Status: status,
+				Severity: sev, ReceivedAt: now, Entities: &domain.Entities{Hosts: []string{"web-01"}},
+			}
+			if _, err := st.Alerts.Create(ctx, a); err != nil {
+				t.Fatal(err)
+			}
+			return a.ID
+		}
+		legacy := mk("Legacy brute force", "", 4) // written before alerts had a status
+		fresh := mk("Fresh brute force", "new", 5)
+
+		news, _ := h.do("GET", "/alerts?status=new&q=brute+force", nil, 200)
+		got := map[string]bool{}
+		for _, it := range news["items"].([]any) {
+			got[sa(it.(map[string]any), "id")] = true
+		}
+		if !got[legacy] || !got[fresh] {
+			t.Errorf("status=new must include alerts without a status; q must match titles: %v", news)
+		}
+		none, _ := h.do("GET", "/alerts?q=no-such-words-anywhere", nil, 200)
+		if len(none["items"].([]any)) != 0 {
+			t.Errorf("q matched nothing yet returned: %v", none)
+		}
+
+		h.do("PATCH", "/alerts/"+fresh, map[string]any{}, 422, reqOpt{loose: true})
+		h.do("PATCH", "/alerts/"+fresh, map[string]any{"status": "snoozed"}, 422, reqOpt{loose: true})
+		h.do("PATCH", "/alerts/"+fresh, map[string]any{"priority": 1}, 400, reqOpt{loose: true})
+		h.do("PATCH", "/alerts/alt_missing", map[string]any{"status": "acknowledged"}, 404)
+		ack, ahdr := h.do("PATCH", "/alerts/"+fresh, map[string]any{"status": "acknowledged", "assignee": " dana "}, 200)
+		if ack["status"] != "acknowledged" || ack["assignee"] != "dana" || ahdr.Get("ETag") == "" {
+			t.Errorf("acknowledge: %v", ack)
+		}
+		bad, _ := h.do("PATCH", "/alerts/"+fresh, map[string]any{"status": "closed"}, 422)
+		if !contains(problemPaths(bad), "verdict") {
+			t.Errorf("closing without a verdict must point at verdict: %v", bad)
+		}
+		closed, _ := h.do("PATCH", "/alerts/"+fresh, map[string]any{"status": "closed", "verdict": "false_positive"}, 200)
+		if closed["status"] != "closed" || closed["verdict"] != "false_positive" {
+			t.Errorf("close: %v", closed)
+		}
+
+		// linking moves a new alert to in_progress; closing the case closes it with the case verdict
+		c, _ := h.do("POST", "/alerts/"+legacy+"/case", nil, 201)
+		if a, _, _ := st.Alerts.Get(ctx, legacy); a.Status != "in_progress" || a.CaseID != sa(c, "id") {
+			t.Errorf("linked alert: status %q case %q", a.Status, a.CaseID)
+		}
+		h.do("PATCH", "/cases/"+sa(c, "id"), map[string]any{"status": "closed", "verdict": "true_positive"}, 200)
+		if a, _, _ := st.Alerts.Get(ctx, legacy); a.Status != "closed" || a.Verdict != "true_positive" {
+			t.Errorf("closing the case must close its alert: status %q verdict %q", a.Status, a.Verdict)
+		}
+
+		names, _ := h.do("GET", "/assignees", nil, 200)
+		var list []string
+		for _, n := range names["items"].([]any) {
+			list = append(list, n.(string))
+		}
+		if !contains(list, "alice") || !contains(list, "dana") {
+			t.Errorf("assignees must include names used on cases and alerts: %v", list)
+		}
+
+		d, _ := h.do("GET", "/dashboard?range=24h", nil, 200)
+		rg, _ := d["range"].(map[string]any)
+		if rg == nil || rg["name"] != "24h" || rg["interval_seconds"] != float64(3600) {
+			t.Fatalf("dashboard range: %v", d["range"])
+		}
+		if n := len(rg["alert_series"].([]any)); n < 24 || n > 25 {
+			t.Errorf("24h at 1h buckets must give 24-25 points, got %d", n)
+		}
+		if rg["alerts"].(map[string]any)["current"].(float64) < 2 {
+			t.Errorf("range alerts: %v", rg["alerts"])
+		}
+		hosts := rg["top_hosts"].([]any)
+		if len(hosts) == 0 || hosts[0].(map[string]any)["value"] != "web-01" {
+			t.Errorf("top hosts: %v", hosts)
+		}
+		h.do("GET", "/dashboard?range=30d", nil, 400, reqOpt{loose: true})
+		h.do("GET", "/dashboard?bogus=1", nil, 400, reqOpt{loose: true})
+	})
+
 	t.Run("observables", func(t *testing.T) {
 		h.t = t
 		list, _ := h.do("GET", "/observables?type=ip&case_id="+caseID+"&sort=-first_seen", nil, 200)

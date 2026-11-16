@@ -71,19 +71,22 @@ type Config struct {
 	PolicyFile        string      // action policy rules (spec 20.1); missing file = defaults
 
 	// Step 9: security.
-	MasterKeyID   string // id of the secret-encryption master key (rotation)
-	MasterKey     []byte // 32 bytes, from base64 SOAR_MASTER_KEY
-	OldMasterKeys map[string][]byte
-	OIDCIssuer    string
-	OIDCAudience  string
-	OIDCJWKSURL   string // optional; discovered from the issuer when empty
-	AuthDisabled  bool   // development only: every request acts as an admin
-	BootstrapKey  string // optional first admin API key (hashed on first start)
-	CORSOrigins   []string
-	OSTLS         *tls.Config // OpenSearch client TLS (nil: system roots)
-	NATSTLS       *tls.Config // NATS client TLS (nil: plain, or system roots for tls:// URLs)
-	ServerTLS     *tls.Config // HTTPS for the role's own port (nil: plain HTTP)
-	ClientCertReq bool        // ServerTLS requires client certificates (mTLS)
+	MasterKeyID     string // id of the secret-encryption master key (rotation)
+	MasterKey       []byte // 32 bytes, from base64 SOAR_MASTER_KEY
+	OldMasterKeys   map[string][]byte
+	OIDCIssuer      string
+	OIDCAudience    string
+	OIDCJWKSURL     string // optional; discovered from the issuer when empty
+	AuthDisabled    bool   // development only: every request acts as an admin
+	BootstrapKey    string // optional first admin API key (hashed on first start)
+	CORSOrigins     []string
+	UIEnabled       bool        // the api role serves the embedded web UI at / (default true)
+	UIOIDCAuthority string      // OIDC authority the browser signs in with (default SOAR_OIDC_ISSUER)
+	UIOIDCClientID  string      // OIDC client id of the web UI (default soar-web)
+	OSTLS           *tls.Config // OpenSearch client TLS (nil: system roots)
+	NATSTLS         *tls.Config // NATS client TLS (nil: plain, or system roots for tls:// URLs)
+	ServerTLS       *tls.Config // HTTPS for the role's own port (nil: plain HTTP)
+	ClientCertReq   bool        // ServerTLS requires client certificates (mTLS)
 
 	// Step 10: ingest.
 	IngestDirs     []string // directories file_object sources may read on the collector (none by default)
@@ -339,6 +342,20 @@ func Load(lookup func(string) (string, bool)) (Config, error) {
 		bad("SOAR_BOOTSTRAP_API_KEY must start with soar_ and have at least 32 random characters after it")
 	}
 	c.CORSOrigins = splitList(get("SOAR_CORS_ORIGINS"))
+	c.UIEnabled = boolEnv(get("SOAR_UI_ENABLED"), true, "SOAR_UI_ENABLED", bad)
+	c.UIOIDCAuthority = get("SOAR_UI_OIDC_AUTHORITY")
+	if c.UIOIDCAuthority == "" {
+		c.UIOIDCAuthority = c.OIDCIssuer
+	}
+	if c.UIOIDCAuthority != "" {
+		if err := checkURL(c.UIOIDCAuthority, "http", "https"); err != nil {
+			bad("SOAR_UI_OIDC_AUTHORITY: %v", err)
+		}
+	}
+	c.UIOIDCClientID = get("SOAR_UI_OIDC_CLIENT_ID")
+	if c.UIOIDCClientID == "" {
+		c.UIOIDCClientID = "soar-web"
+	}
 
 	var err error
 	if c.OSTLS, err = clientTLS(get("SOAR_OS_CA_FILE"), get("SOAR_OS_CERT_FILE"), get("SOAR_OS_KEY_FILE"),
@@ -413,6 +430,8 @@ func (c Config) LogValue() slog.Value {
 		slog.String("master_key_id", c.MasterKeyID),
 		slog.String("oidc_issuer", c.OIDCIssuer),
 		slog.Bool("auth_disabled", c.AuthDisabled),
+		slog.Bool("ui_enabled", c.UIEnabled),
+		slog.String("ui_oidc_authority", c.UIOIDCAuthority),
 		slog.String("os_tls", tlsMode(c.OSTLS)),
 		slog.String("nats_tls", tlsMode(c.NATSTLS)),
 		slog.String("http_tls", serverMode(c.ServerTLS, c.ClientCertReq)),

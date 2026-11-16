@@ -1,5 +1,5 @@
-# Development stack: every role of the platform plus OpenSearch, NATS, S3 object storage (RustFS), Keycloak, the
-# sandboxed Python runner and the web UI. All ports bind to 127.0.0.1.
+# Development stack: every role of the platform plus OpenSearch, NATS, S3 object storage (RustFS), Keycloak and the
+# sandboxed Python runner. The api role also serves the web UI (http://127.0.0.1:8080/). All ports bind to 127.0.0.1.
 # DEVELOPMENT DEFAULTS ARE PUBLIC (master key, bootstrap API key, Keycloak users): change them in
 # deploy/compose/.env before this stack holds real data. Production: deploy/prod (Step 15).
 # The OpenSearch security plugin is OFF here; production enables TLS and a least-privilege user.
@@ -129,7 +129,13 @@ services:
       # First admin API key (CLI, scripts, tests). CHANGE IT: this default is public.
       SOAR_BOOTSTRAP_API_KEY: "${SOAR_BOOTSTRAP_API_KEY:-soar_dev-bootstrap-key-change-me-0123456789abcdef}"
       SOAR_AUTH_DISABLED: "${SOAR_AUTH_DISABLED:-false}"
-    ports: ["127.0.0.1:8080:8080"]
+      # The web UI is served by this role at http://<publish address>:8080/ (spec 12).
+      SOAR_UI_ENABLED: "${SOAR_UI_ENABLED:-true}"
+      SOAR_UI_OIDC_AUTHORITY: "${SOAR_UI_OIDC_AUTHORITY:-}"   # empty: SOAR_OIDC_ISSUER
+      SOAR_UI_OIDC_CLIENT_ID: "${SOAR_UI_OIDC_CLIENT_ID:-soar-web}"
+    # 127.0.0.1 by default; SOAR_API_PUBLISH=<LAN address> in .env opens the API and UI to the LAN
+    # over plain HTTP (lab only: sign in with an API key; Keycloak login needs localhost or HTTPS).
+    ports: ["${SOAR_API_PUBLISH:-127.0.0.1}:8080:8080"]
     healthcheck: &hc
       test: ["CMD", "/soar", "healthcheck", "http://127.0.0.1:8080/readyz"]
       interval: 10s
@@ -268,17 +274,6 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-
-  # Web UI (spec 12), served by nginx, which also proxies /api to the api service.
-  web:
-    image: soar-web:dev
-    pull_policy: never
-    restart: unless-stopped
-    read_only: true
-    tmpfs: ["/var/cache/nginx", "/var/run", "/tmp"]
-    ports: ["127.0.0.1:3000:8080"]
-    depends_on:
-      api: { condition: service_healthy }
 
   # Optional monitoring: docker compose --profile monitoring up -d  (Prometheus on 127.0.0.1:9090)
   prometheus:

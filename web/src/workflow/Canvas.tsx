@@ -1,7 +1,7 @@
 import { useCallback, useMemo } from "react";
 import {
-  Background, Controls, Handle, MarkerType, MiniMap, Position, ReactFlow, ReactFlowProvider,
-  type Connection, type Edge, type Node, type NodeProps, type NodeChange, type EdgeChange,
+  Background, BackgroundVariant, Controls, Handle, MarkerType, MiniMap, Position, ReactFlow, ReactFlowProvider,
+  type Connection, type Edge, type EdgeChange, type Node, type NodeChange, type NodeProps,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { GitBranch, Hourglass, ListTree, Play, ShieldQuestion, Split, Square, Variable, Workflow, Zap } from "lucide-react";
@@ -13,9 +13,15 @@ const icons: Record<string, typeof Zap> = {
   set: Variable, subworkflow: Workflow, end: Square,
 };
 
-const statusRing: Record<string, string> = {
-  running: "ring-2 ring-blue-500", retry_wait: "ring-2 ring-amber-500", waiting: "ring-2 ring-amber-500",
-  succeeded: "ring-2 ring-green-500", failed: "ring-2 ring-red-500", skipped: "opacity-50", cancelled: "opacity-50",
+// node state during a run: border + a small status line, never color alone
+const stateStyle: Record<string, { ring: string; dot: string }> = {
+  running: { ring: "border-accent shadow-[0_0_0_3px_rgb(var(--accent)/0.18)]", dot: "bg-accent animate-live" },
+  retry_wait: { ring: "border-warn shadow-[0_0_0_3px_rgb(var(--warn)/0.15)]", dot: "bg-warn" },
+  waiting: { ring: "border-warn shadow-[0_0_0_3px_rgb(var(--warn)/0.15)]", dot: "bg-warn animate-live" },
+  succeeded: { ring: "border-good/60", dot: "bg-good" },
+  failed: { ring: "border-crit shadow-[0_0_0_3px_rgb(var(--crit)/0.15)]", dot: "bg-crit" },
+  skipped: { ring: "opacity-50", dot: "bg-fg-4" },
+  cancelled: { ring: "opacity-50", dot: "bg-fg-4" },
 };
 
 function SoarNode({ data, selected }: NodeProps<Node<FlowNodeData>>) {
@@ -23,16 +29,34 @@ function SoarNode({ data, selected }: NodeProps<Node<FlowNodeData>>) {
   const t = nodeType(n);
   const Icon = icons[t] ?? Play;
   const sub = n.action ?? (t === "subworkflow" ? String(n.workflow ?? "") : t === "wait" ? String(n.duration ?? n.until ?? "") : t);
+  const st = data.status ? stateStyle[data.status] : undefined;
   return (
-    <div className={cn("w-[200px] rounded-md border bg-card px-3 py-2 text-xs shadow-sm",
-      data.status && statusRing[data.status], data.invalid && "ring-2 ring-red-500", selected && "border-primary")}>
-      <Handle type="target" position={Position.Top} />
-      <div className="flex items-center gap-1.5 font-semibold">
-        <Icon className="h-3.5 w-3.5 text-primary" /> <span className="truncate">{n.id}</span>
-        {data.status && <span className="ml-auto text-[10px] font-normal text-muted-foreground">{data.status}{data.attempt && data.attempt > 1 ? ` #${data.attempt}` : ""}</span>}
+    <div
+      className={cn(
+        "w-[208px] rounded-lg border bg-raised px-3 py-2 text-xs transition-shadow",
+        st?.ring ?? "border-line-strong",
+        data.invalid && "border-crit shadow-[0_0_0_3px_rgb(var(--crit)/0.18)]",
+        selected && "border-accent shadow-[0_0_0_3px_rgb(var(--accent)/0.25)]",
+      )}
+    >
+      <Handle type="target" position={Position.Top} className="!size-2 !border-2" />
+      <div className="flex items-center gap-2">
+        <span className={cn("flex size-6 shrink-0 items-center justify-center rounded-md", t === "approval" ? "bg-warn/15 text-warn" : t === "branch" || t === "parallel" ? "bg-accent/15 text-accent" : t === "end" ? "bg-hover text-fg-3" : "bg-accent/10 text-accent")}>
+          <Icon className="size-3.5" />
+        </span>
+        <div className="min-w-0 flex-1">
+          <div className="truncate font-semibold text-fg">{n.id}</div>
+          <div className="truncate font-mono text-[10.5px] text-fg-3">{sub}</div>
+        </div>
       </div>
-      <div className="truncate font-mono text-[11px] text-muted-foreground">{sub}</div>
-      <Handle type="source" position={Position.Bottom} />
+      {data.status && (
+        <div className="mt-1.5 flex items-center gap-1.5 border-t border-line pt-1.5 text-[10.5px] text-fg-3">
+          <span className={cn("size-1.5 rounded-full", st?.dot ?? "bg-fg-4")} />
+          {data.status.replace("_", " ")}
+          {data.attempt && data.attempt > 1 ? <span className="ml-auto">attempt {data.attempt}</span> : null}
+        </div>
+      )}
+      <Handle type="source" position={Position.Bottom} className="!size-2 !border-2" />
     </div>
   );
 }
@@ -71,10 +95,15 @@ function Inner({ def, onChange, statuses, invalid, selected, onSelect }: Props) 
     if (d !== def) onChange(d);
   }, [def, onChange, g.edges]);
   const onConnect = useCallback((c: Connection) => { if (onChange && c.source && c.target) onChange(connect(def, c.source, c.target)); }, [def, onChange]);
+  const edges = useMemo(() => g.edges.map((e: Edge) => ({
+    ...e,
+    markerEnd: { type: MarkerType.ArrowClosed, width: 16, height: 16, color: "rgb(var(--fg-4))" },
+    style: { strokeWidth: 1.5, ...(e.style ?? {}) },
+  })), [g.edges]);
   return (
     <ReactFlow
       nodes={nodes}
-      edges={g.edges.map((e: Edge) => ({ ...e, markerEnd: { type: MarkerType.ArrowClosed } }))}
+      edges={edges}
       nodeTypes={nodeTypes}
       onNodesChange={onNodesChange}
       onEdgesChange={onEdgesChange}
@@ -86,11 +115,13 @@ function Inner({ def, onChange, statuses, invalid, selected, onSelect }: Props) 
       elementsSelectable
       deleteKeyCode={editable ? ["Backspace", "Delete"] : null}
       fitView
+      fitViewOptions={{ padding: 0.2, maxZoom: 1.1 }}
+      minZoom={0.2}
       proOptions={{ hideAttribution: true }}
     >
-      <Background />
-      <Controls showInteractive={false} />
-      <MiniMap pannable zoomable className="!bg-card" />
+      <Background variant={BackgroundVariant.Dots} gap={18} size={1} />
+      <Controls showInteractive={false} position="bottom-left" />
+      <MiniMap pannable zoomable position="bottom-right" nodeColor="rgb(var(--line-strong))" nodeStrokeWidth={0} className="!rounded-md !border !border-line" />
     </ReactFlow>
   );
 }

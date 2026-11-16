@@ -148,8 +148,15 @@ paths:
     get:
       operationId: getDashboard
       summary: Dashboard figures (alert volume, open cases, MTTR, automation rate, queue and source health)
+      description: |
+        Without `range` the response carries the fixed 24-hour figures only. With `range` it also
+        carries a `range` section: time series, top-5 lists and each figure for the previous period
+        of the same length. There is no 30-day range because retention keeps 7 days.
+      parameters:
+        - { name: range, in: query, schema: { type: string, enum: [1h, 24h, 7d] } }
       responses:
         '200': { description: The figures, content: { application/json: { schema: { $ref: '#/components/schemas/Dashboard' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
         default: { $ref: '#/components/responses/Problem' }
 
   /stream:
@@ -286,11 +293,13 @@ paths:
         - { name: source_id, in: query, schema: { type: string } }
         - { name: system, in: query, schema: { type: string } }
         - { name: kind, in: query, schema: { type: string } }
-        - { name: status, in: query, schema: { type: string } }
+        - { name: status, in: query, schema: { type: string }, description: 'comma-separated; "new" also matches alerts that have no status yet' }
         - { name: verdict, in: query, schema: { type: string } }
         - { name: severity, in: query, schema: { type: string }, description: Exact severity, comma-separated for several }
         - { name: min_severity, in: query, schema: { type: integer, minimum: 1, maximum: 5 } }
         - { name: case_id, in: query, schema: { type: string } }
+        - { name: assignee, in: query, schema: { type: string } }
+        - { name: q, in: query, schema: { type: string, maxLength: 200 }, description: 'Free text over title, description, observables, hosts, users and tags (all words must match)' }
         - { name: from, in: query, schema: { type: string, format: date-time } }
         - { name: to, in: query, schema: { type: string, format: date-time } }
       responses:
@@ -316,6 +325,32 @@ paths:
       responses:
         '200': { description: The alert, headers: { ETag: { schema: { type: string } } }, content: { application/json: { schema: { $ref: '#/components/schemas/Alert' } } } }
         '404': { $ref: '#/components/responses/Problem' }
+        default: { $ref: '#/components/responses/Problem' }
+    patch:
+      operationId: patchAlert
+      summary: Triage an alert (status, verdict, assignee; absent fields stay as they are)
+      description: Closing an alert needs a verdict, given in the same request or already on the alert.
+      parameters: [{ $ref: '#/components/parameters/IfMatch' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/AlertPatch' } } } }
+      responses:
+        '200': { description: The updated alert, headers: { ETag: { schema: { type: string } } }, content: { application/json: { schema: { $ref: '#/components/schemas/Alert' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        default: { $ref: '#/components/responses/Problem' }
+
+  /assignees:
+    get:
+      operationId: listAssignees
+      summary: Names to offer when assigning alerts and cases
+      description: |
+        The assignees already used on cases and alerts plus the enabled user principals, sorted.
+        Needs alerts:write (every role that can assign holds it). OIDC users are not principals,
+        so they appear once they have been assigned something.
+      responses:
+        '200': { description: The names, content: { application/json: { schema: { $ref: '#/components/schemas/Assignees' } } } }
+        '403': { $ref: '#/components/responses/Problem' }
         default: { $ref: '#/components/responses/Problem' }
 
   /alerts/{id}/case:
@@ -356,6 +391,7 @@ paths:
         - { name: assignee, in: query, schema: { type: string } }
         - { name: tag, in: query, schema: { type: string } }
         - { name: verdict, in: query, schema: { type: string } }
+        - { name: q, in: query, schema: { type: string, maxLength: 200 }, description: Free text over title, summary and tags (all words must match) }
       responses:
         '200': { description: A page of cases, content: { application/json: { schema: { $ref: '#/components/schemas/CasePage' } } } }
         '400': { $ref: '#/components/responses/Problem' }
@@ -1183,6 +1219,7 @@ components:
             entities: { type: object, additionalProperties: true }
             mitre: { type: object, properties: { technique_ids: { type: array, items: { type: string } }, techniques: { type: array, items: { type: string } }, tactics: { type: array, items: { type: string } } } }
             verdict: { type: string }
+            assignee: { type: string }
             ext: { type: object, additionalProperties: true }
             raw_ref: { type: string }
             occurred_at: { type: string, format: date-time }
@@ -1190,6 +1227,19 @@ components:
             last_seen: { type: string, format: date-time }
             occurrence_count: { type: integer }
             case_id: { type: string }
+    AlertPatch:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        status: { type: string, enum: [new, acknowledged, in_progress, closed] }
+        verdict: { type: string, enum: ['', true_positive, false_positive, benign, unknown] }
+        assignee: { type: string, maxLength: 200 }
+    Assignees:
+      type: object
+      required: [items]
+      properties:
+        items: { type: array, items: { type: string } }
     AlertCreate:
       type: object
       required: [title, severity]
@@ -1879,6 +1929,50 @@ components:
         queues: { type: array, items: { type: object, additionalProperties: true } }
         sources: { type: array, items: { type: object, additionalProperties: true } }
         errors: { type: object, additionalProperties: { type: string } }
+        range: { $ref: '#/components/schemas/DashboardRange' }
+    DashboardRange:
+      type: object
+      required: [name, from, to, interval_seconds, alerts, alert_series, executions, failed_executions, execution_series, cases_opened, automation_rate, mttr_hours, top_rules, top_sources, top_hosts]
+      properties:
+        name: { type: string, enum: [1h, 24h, 7d] }
+        from: { type: string, format: date-time }
+        to: { type: string, format: date-time }
+        interval_seconds: { type: integer, description: width of each series bucket }
+        alerts: { $ref: '#/components/schemas/PeriodCount' }
+        alert_series: { type: array, items: { $ref: '#/components/schemas/SeriesPoint' }, description: alerts per bucket by severity ("1".."5") }
+        executions: { $ref: '#/components/schemas/PeriodCount' }
+        failed_executions: { $ref: '#/components/schemas/PeriodCount' }
+        execution_series: { type: array, items: { $ref: '#/components/schemas/SeriesPoint' }, description: executions per bucket by status }
+        cases_opened: { $ref: '#/components/schemas/PeriodCount' }
+        automation_rate: { $ref: '#/components/schemas/PeriodFloat' }
+        mttr_hours: { $ref: '#/components/schemas/PeriodFloat' }
+        top_rules: { type: array, items: { $ref: '#/components/schemas/TermCount' } }
+        top_sources: { type: array, items: { $ref: '#/components/schemas/TermCount' } }
+        top_hosts: { type: array, items: { $ref: '#/components/schemas/TermCount' } }
+    PeriodCount:
+      type: object
+      required: [current, previous]
+      properties:
+        current: { type: integer }
+        previous: { type: integer, description: the same figure for the period of equal length before }
+    PeriodFloat:
+      type: object
+      required: [current, previous]
+      properties:
+        current: { type: number, nullable: true }
+        previous: { type: number, nullable: true }
+    SeriesPoint:
+      type: object
+      required: [t, counts]
+      properties:
+        t: { type: string, format: date-time, description: start of the bucket }
+        counts: { type: object, additionalProperties: { type: integer } }
+    TermCount:
+      type: object
+      required: [value, count]
+      properties:
+        value: { type: string }
+        count: { type: integer }
     ConnectionTestResult:
       type: object
       required: [ok, status, execution_id]

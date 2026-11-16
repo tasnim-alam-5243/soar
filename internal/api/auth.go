@@ -73,6 +73,7 @@ var permOverrides = map[string]string{
 	"PATCH /cases/{id}/tasks/{task_id}": "cases:write",
 	"GET /cases/{id}/alerts":            "cases:read",
 	"GET /dashboard":                    "alerts:read",
+	"GET /assignees":                    "alerts:write", // only people who can assign need the list
 }
 
 // PermFor returns the permission an operation needs ("" = any authenticated caller).
@@ -143,6 +144,9 @@ func (w *statusWriter) Flush() {
 		f.Flush()
 	}
 }
+
+// Unwrap lets http.ResponseController reach the connection (per-request write deadlines).
+func (w *statusWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
 // guard authenticates, authorises and audits one route.
 func (s *Server) guard(rt Route, h http.HandlerFunc) http.HandlerFunc {

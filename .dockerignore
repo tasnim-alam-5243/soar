@@ -9,3 +9,4 @@ runner/python/.venv
 **/__pycache__
 **/.pytest_cache
 *.tar.gz
+internal/webui/dist

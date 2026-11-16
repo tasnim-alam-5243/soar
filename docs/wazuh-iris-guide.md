@@ -29,8 +29,9 @@ SOAR does not verify IRIS's self-signed certificate (`verify_tls: false`).
 ```bash
 cd /root/soar/WFsoar/soar
 cp -n deploy/compose/.env.example deploy/compose/.env
-openssl rand -hex 32          # -> the ingest token
-openssl rand -base64 32       # -> the secret-encryption master key
+openssl rand -hex 32                  # -> the ingest token
+openssl rand -base64 32               # -> the secret-encryption master key
+echo "soar_$(openssl rand -hex 24)"   # -> the admin API key: soar_ + 48 characters (at least 32 are required)
 ```
 
 Edit `deploy/compose/.env`:
@@ -44,8 +45,9 @@ SOAR_INGEST_PUBLISH=10.10.192.198
 # secrets stored with one key cannot be read with another.
 SOAR_MASTER_KEY_ID=k1
 SOAR_MASTER_KEY=<the base64 value>
-# your admin API key for the commands below (soar_ + 32 or more random characters)
-SOAR_BOOTSTRAP_API_KEY=soar_<random>
+# your admin API key for the commands below: the whole third value, e.g. soar_3f9c...
+# (shorter than soar_ + 32 characters and the api refuses to start; make up then fails with "api is unhealthy")
+SOAR_BOOTSTRAP_API_KEY=soar_<48 hex characters>
 ```
 
 ### 1.2 Start
@@ -55,16 +57,21 @@ make up          # builds the images (pulls the patched Go base), runs migrate a
 make ps          # every service healthy
 ```
 
+If `make up` ends with `dependency failed to start: container soar-api-1 is unhealthy`, the api refused its
+configuration; the reason is in its log:
+`docker compose -f deploy/compose/docker-compose.yml logs api | grep -m1 'refusing to start'` (fix `.env`, run
+`make up` again). Processor, collector and ingest wait for a healthy api, so they show as "interrupted" until then.
+
 `migrate` creates the indices this version needs (for example `soar-subscriptions`); `seed` installs the Wazuh
 pack: the `wazuh-prod` push source, the `wazuh_alert@1` mapping, the `wazuh-default@1` filters and two lists.
 
 ### 1.3 Shell helpers
 
-Paste into the terminal you work from (use your own values):
+Paste into a terminal in the repository directory (the keys are read from `.env`, never typed):
 
 ```bash
-export SOAR_KEY='soar_<random>'                 # SOAR_BOOTSTRAP_API_KEY
-export TOKEN='<64 hex characters>'              # SOAR_SOURCE_TOKEN_WAZUH_PROD
+export SOAR_KEY=$(grep -m1 '^SOAR_BOOTSTRAP_API_KEY=' deploy/compose/.env | cut -d= -f2-)
+export TOKEN=$(grep -m1 '^SOAR_SOURCE_TOKEN_WAZUH_PROD=' deploy/compose/.env | cut -d= -f2-)
 export API=http://localhost:8080/api/v1
 api()  { curl -s -H "Authorization: Bearer $SOAR_KEY" -H 'Content-Type: application/json' -X "$1" "$API$2" "${@:3}"; }
 push() { curl -s -w ' HTTP %{http_code}\n' -XPOST http://10.10.192.198:8081/ingest/wazuh-prod \

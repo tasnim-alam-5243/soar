@@ -1,16 +1,26 @@
-import * as TabsPrimitive from "@radix-ui/react-tabs";
+import * as React from "react";
+import * as T from "@radix-ui/react-tabs";
 import { cn } from "@/lib/utils";
 
-export const Tabs = TabsPrimitive.Root;
-export const TabsList = ({ className, ...p }: TabsPrimitive.TabsListProps) => (
-  <TabsPrimitive.List className={cn("inline-flex h-9 items-center rounded-md bg-muted p-1 text-muted-foreground", className)} {...p} />
+export const Tabs = T.Root;
+
+export const TabsList = ({ className, ...p }: React.ComponentProps<typeof T.List>) => (
+  <T.List className={cn("flex items-center gap-1 border-b border-line", className)} {...p} />
 );
-export const TabsTrigger = ({ className, ...p }: TabsPrimitive.TabsTriggerProps) => (
-  <TabsPrimitive.Trigger
-    className={cn("inline-flex items-center rounded-sm px-3 py-1 text-sm font-medium data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-sm", className)}
+
+export const TabsTrigger = ({ className, children, count, ...p }: React.ComponentProps<typeof T.Trigger> & { count?: number }) => (
+  <T.Trigger
+    className={cn(
+      "relative -mb-px inline-flex h-9 items-center gap-1.5 border-b-2 border-transparent px-2.5 text-sm font-medium text-fg-3 transition-colors hover:text-fg data-[state=active]:border-accent data-[state=active]:text-fg",
+      className,
+    )}
     {...p}
-  />
+  >
+    {children}
+    {count !== undefined && <span className="tabular rounded bg-hover px-1 text-2xs text-fg-3">{count}</span>}
+  </T.Trigger>
 );
-export const TabsContent = ({ className, ...p }: TabsPrimitive.TabsContentProps) => (
-  <TabsPrimitive.Content className={cn("mt-3 focus-visible:outline-none", className)} {...p} />
+
+export const TabsContent = ({ className, ...p }: React.ComponentProps<typeof T.Content>) => (
+  <T.Content className={cn("pt-4 focus:outline-none", className)} {...p} />
 );

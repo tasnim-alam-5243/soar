@@ -50,7 +50,7 @@ export function graphFrom(def: Definition, statuses: Record<string, { status?: s
       label,
       type: "smoothstep",
       animated: statuses[src]?.status === "running",
-      style: kind === "error" ? { stroke: "#dc2626", strokeDasharray: "5 4" } : kind === "reject" ? { stroke: "#ea580c", strokeDasharray: "5 4" } : undefined,
+      style: kind === "error" ? { stroke: "rgb(var(--crit))", strokeDasharray: "5 4" } : kind === "reject" ? { stroke: "rgb(var(--serious))", strokeDasharray: "5 4" } : undefined,
       data: { kind, idx },
     });
   };

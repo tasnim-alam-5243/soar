@@ -30,8 +30,8 @@ One Go binary (`soar`), one image, role chosen by subcommand, plus the Python ru
 sudo ./scripts/rocky10-setup.sh      # once: Docker CE, compose plugin, Go, make, vm.max_map_count
 # log out/in so the docker group applies, then:
 cp deploy/compose/.env.example deploy/compose/.env   # replace the public development secrets
-make up                              # builds soar, soar-runner and soar-web, starts the stack, waits for /readyz
-open http://localhost:3000           # UI; Keycloak dev users: admin/admin, engineer/engineer, analyst/analyst, viewer/viewer
+make up                              # builds soar (UI embedded) and soar-runner, starts the stack, waits for /readyz
+open http://localhost:8080           # UI, served by the api role; Keycloak dev users: admin/admin, engineer/engineer, analyst/analyst, viewer/viewer
 make test-all                        # Go, Python runner and UI tests (make runner-venv and make web-install first)
 make test-integration                # needs the stack running
 make down                            # stop (keep data) | make clean (delete data)
@@ -50,8 +50,7 @@ curl -s -H "Authorization: Bearer $SOAR_KEY" localhost:8080/api/v1/me | jq .
 
 | Service | Port | Notes |
 |---|---|---|
-| web | 3000 | React UI; nginx proxies `/api` to the api |
-| api | 8080 | `/api/v1/...` (OIDC or API key), `/healthz`, `/readyz`, `/metrics` |
+| api | 8080 | Web UI at `/`, `/api/v1/...` (OIDC or API key), `/healthz`, `/readyz`, `/metrics`; `SOAR_API_PUBLISH` in `.env` publishes it on a LAN address ([docs/ui.md](docs/ui.md)) |
 | ingest | 8081 | `POST /ingest/{source}` (per-source token or HMAC); `SOAR_INGEST_PUBLISH` in `.env` publishes it on a LAN address for Wazuh push |
 | collector (syslog sources) | 5514 udp/tcp | only when a `syslog` source listens on `:5514` |
 | processor / collector / orchestrator / worker / scheduler | 8082-8086 | health, `/metrics`, `/stats`, inside the compose network |
@@ -456,12 +455,15 @@ survive restarts.
 
 ## Step 12: web UI
 
-`web/` (React 18, TypeScript, Vite, React Flow, TanStack Query, Zustand, Tailwind with shadcn-style components,
-Monaco, client types generated from `api/openapi.yaml`). Pages: dashboard (`GET /dashboard`), alerts, cases,
-workflow list and editor (canvas and YAML edit the same definition; the server validates on every change),
-executions with a live canvas, approvals, sources (test with a sample payload), connections and secrets, admin
-(principals, roles, audit, queues/DLQ). Live updates through `GET /stream` (server-sent events).
-`make web-dev` runs it on :3000 against a local API; `make web-test` type-checks and runs the unit tests.
+`web/` (React 18, TypeScript, Vite, React Flow, TanStack Query, Zustand, Tailwind, Radix, cmdk, Recharts, Monaco,
+client types generated from `api/openapi.yaml`) is built into the `soar` binary: `make build` produces one
+`bin/soar` whose `api` role serves the console at `/` and the API at `/api/v1` on the same port. Pages: overview
+(`GET /dashboard?range=`), alerts (triage, bulk actions, saved views), cases, workflow list and editor (canvas and
+YAML edit the same definition; the server validates on every change), executions with a live canvas and step
+timeline, approvals, sources, connections and secrets, admin (principals, roles, audit, queues/DLQ). Live updates
+through `GET /stream`; ⌘K command palette and keyboard shortcuts (`?`). `make web-dev` runs it with hot reload on
+:3000 against a local API; `make web-test` type-checks and runs the unit tests. Build, run, LAN access and security
+headers: [docs/ui.md](docs/ui.md).
 
 ## Step 13: integrations
 

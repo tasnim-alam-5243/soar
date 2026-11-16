@@ -79,28 +79,41 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request) error {
 	topics := strings.Split(r.URL.Query().Get("topics"), ",")
 	ch := s.events.subscribe(topics)
 	defer s.events.unsubscribe(ch)
+	// The server's WriteTimeout (30 s) would cut every stream; instead each write gets its
+	// own deadline, so a live client stays connected and a dead one is dropped within a minute.
+	rc := http.NewResponseController(w)
+	extend := func() { _ = rc.SetWriteDeadline(time.Now().Add(streamWriteWindow)) }
+	extend()
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("X-Accel-Buffering", "no")
 	w.WriteHeader(http.StatusOK)
 	fmt.Fprintf(w, "retry: 3000\n: connected\n\n")
 	fl.Flush()
-	tick := time.NewTicker(15 * time.Second)
+	tick := time.NewTicker(streamKeepAlive)
 	defer tick.Stop()
 	for {
 		select {
 		case <-r.Context().Done():
 			return nil
 		case <-tick.C:
+			extend()
 			fmt.Fprint(w, ": keep-alive\n\n")
 			fl.Flush()
 		case ev := <-ch:
+			extend()
 			b, _ := json.Marshal(ev)
 			fmt.Fprintf(w, "event: %s\ndata: %s\n\n", ev.Topic, b)
 			fl.Flush()
 		}
 	}
 }
+
+// Keep-alives keep proxies and the per-write deadline from closing an idle stream.
+var (
+	streamKeepAlive   = 15 * time.Second
+	streamWriteWindow = time.Minute
+)
 
 func slogActor(p security.Principal) slog.Attr { return slog.String("actor", p.Name) }
 

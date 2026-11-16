@@ -14,6 +14,7 @@ import (
 	"github.com/yourorg/soar/internal/security"
 	"github.com/yourorg/soar/internal/service"
 	"github.com/yourorg/soar/internal/store/opensearch"
+	"github.com/yourorg/soar/internal/webui"
 )
 
 // Run serves the REST API and the health endpoints until ctx is cancelled.
@@ -89,5 +90,12 @@ func Run(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 	return service.RunWith(ctx, "api", cfg, log, func(mux *http.ServeMux, _ *opensearch.Client) {
 		s.Mount(mux)
 		s.MountCORS(mux, cfg.CORSOrigins)
+		if cfg.UIEnabled {
+			ui := webui.New(webui.Config{APIBase: Prefix, OIDCAuthority: cfg.UIOIDCAuthority, OIDCClientID: cfg.UIOIDCClientID})
+			mux.Handle("/", ui)
+			if !ui.Embedded() {
+				log.Warn("this binary has no web UI bundle: / shows how to build it (make build)")
+			}
+		}
 	})
 }

@@ -38,7 +38,7 @@ One Go binary, one image, role chosen by subcommand:
 | `soar scheduler` | Cron, pollers, timers, recovery (leader-elected) |
 | `soar migrate` | Index templates and migrations |
 
-Plus: `runner` (Python, gRPC, sandboxed) and `web` (React, served by nginx).
+Plus: `runner` (Python, gRPC, sandboxed). The React console is embedded in the binary and served by `soar api`.
 
 ## 3. Design rules, scope, and capacity
 
@@ -833,7 +833,9 @@ Realtime UI updates: `GET /stream` (Server-Sent Events) for execution and case c
 
 ## 12. Frontend
 
-**Stack:** React 18 + TypeScript + Vite · React Flow (workflow canvas) · TanStack Query (server state) · Zustand (UI state) · React Router · Tailwind + shadcn/ui · Monaco (CEL/YAML editor) · generated API client from `openapi.yaml`.
+**Stack:** React 18 + TypeScript + Vite · React Flow (workflow canvas) · TanStack Query (server state) · Zustand (UI state) · React Router · Tailwind + Radix primitives · cmdk (command palette) · Recharts · Monaco (CEL/YAML editor) · generated API client from `openapi.yaml`.
+
+**Delivery:** the Vite build is embedded in the `soar` binary (`go build -tags ui`, run by `make build`); `soar api` serves it at `/` with `/config.json` built from env and strict security headers, next to `/api/v1` on the same port. Design and decisions: `docs/ui-dashboard-plan.md`; operations: `docs/ui.md`.
 
 | Page | Purpose |
 |---|---|
@@ -894,7 +896,7 @@ services:
   worker:       { image: soar:dev, command: ["soar","worker"] }
   scheduler:    { image: soar:dev, command: ["soar","scheduler"] }
   runner:       { image: soar-runner:dev }                    # no external network
-  web:          { image: soar-web:dev, ports: ["3000:80"] }
+  # the web UI is served by the api service (embedded in the soar binary)
 ```
 
 Multi-stage Go build, static binary, non-root, distroless final image. Health: `/healthz` (alive), `/readyz` (deps reachable).

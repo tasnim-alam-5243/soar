@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"time"
 
@@ -134,12 +135,70 @@ func (s *Service) SnapshotAlert(ctx context.Context, caseID, alertID string) err
 	if _, err := s.St.CaseAlerts.Put(ctx, ca); err != nil {
 		return err
 	}
-	if a.CaseID != caseID {
-		if _, _, err := s.St.Alerts.Update(ctx, alertID, func(x *domain.Alert) error { x.CaseID = caseID; return nil }); err != nil && s.Log != nil {
+	if a.CaseID != caseID || AlertTakenUp(a.Status) {
+		if _, _, err := s.St.Alerts.Update(ctx, alertID, func(x *domain.Alert) error {
+			x.CaseID = caseID
+			if AlertTakenUp(x.Status) {
+				x.Status = AlertInProgress // a case now owns the investigation
+			}
+			return nil
+		}); err != nil && s.Log != nil {
 			s.Log.WarnContext(ctx, "could not set case_id on alert; the case still holds its snapshot", "alert", alertID, "error", err.Error())
 		}
 	}
 	return nil
+}
+
+// Alert statuses and verdicts. Alerts written before statuses existed have none and
+// count as new.
+const (
+	AlertNew          = "new"
+	AlertAcknowledged = "acknowledged"
+	AlertInProgress   = "in_progress"
+	AlertClosed       = "closed"
+)
+
+var (
+	AlertStatuses = []string{AlertNew, AlertAcknowledged, AlertInProgress, AlertClosed}
+	AlertVerdicts = []string{"", "true_positive", "false_positive", "benign", "unknown"}
+)
+
+// AlertTakenUp reports whether linking an alert in this status to a case moves it to
+// in_progress (new and acknowledged alerts; in_progress and closed ones stay).
+func AlertTakenUp(status string) bool {
+	return status == "" || status == AlertNew || status == AlertAcknowledged
+}
+
+// CloseAlerts closes the still-open alerts linked to a closed case. Each gets the case's
+// verdict, or keeps its own, or "unknown" when neither exists, so every closed alert
+// carries an outcome. Alerts that expired (retention) are skipped. It returns the ids
+// it closed; failures are logged, not returned, because the case is already closed.
+func (s *Service) CloseAlerts(ctx context.Context, c domain.Case) []string {
+	var closed []string
+	for _, id := range c.AlertIDs {
+		changed := false
+		_, _, err := s.St.Alerts.Update(ctx, id, func(a *domain.Alert) error {
+			changed = false
+			if a.Status == AlertClosed {
+				return nil
+			}
+			a.Status, changed = AlertClosed, true
+			switch {
+			case c.Verdict != "":
+				a.Verdict = c.Verdict
+			case a.Verdict == "":
+				a.Verdict = "unknown"
+			}
+			return nil
+		})
+		switch {
+		case err == nil && changed:
+			closed = append(closed, id)
+		case err != nil && !errors.Is(err, store.ErrNotFound) && s.Log != nil:
+			s.Log.WarnContext(ctx, "case closed but one of its alerts could not be closed", "case", c.ID, "alert", id, "error", err.Error())
+		}
+	}
+	return closed
 }
 
 // ApplyStatus sets a case's status and keeps closed_at in step (closing starts the
@@ -207,6 +266,11 @@ func (s *Service) Update(ctx context.Context, caseID string, p Patch, actor stri
 	}
 	if len(changed) > 0 {
 		s.Timeline(ctx, caseID, "case.updated", actor, map[string]any{"fields": strings.Join(changed, ",")})
+	}
+	if doc.Status == "closed" && slices.Contains(changed, "status") {
+		if ids := s.CloseAlerts(ctx, doc); len(ids) > 0 {
+			s.Timeline(ctx, caseID, "alerts.closed", actor, map[string]any{"alert_ids": strings.Join(ids, ",")})
+		}
 	}
 	return doc, changed, nil
 }
